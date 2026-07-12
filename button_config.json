@@ -1,0 +1,106 @@
+{
+  "menu_profile": {
+    "text": "Profile",
+    "icon_custom_emoji_id": "5904630315946611415",
+    "style": null
+  },
+  "menu_product": {
+    "text": "Shop Now",
+    "icon_custom_emoji_id": "5854908544712707500",
+    "style": "primary"
+  },
+  "menu_wallet": {
+    "text": "Wallet",
+    "icon_custom_emoji_id": "5417924076503062111",
+    "style": null
+  },
+  "menu_myorder": {
+    "text": "My Order",
+    "icon_custom_emoji_id": "5197269100878907942",
+    "style": null
+  },
+  "buy": {
+    "text": null,
+    "icon_custom_emoji_id": null,
+    "style": "danger"
+  },
+  "apply_promo": {
+    "text": null,
+    "icon_custom_emoji_id": null,
+    "style": "primary"
+  },
+  "deposit": {
+    "text": null,
+    "icon_custom_emoji_id": null,
+    "style": "primary"
+  },
+  "back": {
+    "text": null,
+    "icon_custom_emoji_id": null,
+    "style": null
+  },
+  "cancel": {
+    "text": null,
+    "icon_custom_emoji_id": null,
+    "style": "danger"
+  },
+  "confirm": {
+    "text": null,
+    "icon_custom_emoji_id": null,
+    "style": "success"
+  },
+  "in_stock": {
+    "text": null,
+    "icon_custom_emoji_id": null,
+    "style": "primary"
+  },
+  "out_of_stock": {
+    "text": null,
+    "icon_custom_emoji_id": null,
+    "style": "danger"
+  },
+  "low_stock": {
+    "text": null,
+    "icon_custom_emoji_id": null,
+    "style": "primary"
+  },
+  "qty_minus": {
+    "text": null,
+    "icon_custom_emoji_id": null,
+    "style": null
+  },
+  "qty_plus": {
+    "text": null,
+    "icon_custom_emoji_id": null,
+    "style": null
+  },
+  "qty_custom": {
+    "text": null,
+    "icon_custom_emoji_id": null,
+    "style": "primary"
+  },
+  "deposit_custom": {
+    "text": null,
+    "icon_custom_emoji_id": null,
+    "style": "primary"
+  },
+  "order_detail": {
+    "text": null,
+    "icon_custom_emoji_id": null,
+    "style": null
+  },
+  "pay_wallet": {
+    "text": null,
+    "icon_custom_emoji_id": null,
+    "style": "success"
+  },
+  "pay_bakong": {
+    "text": null,
+    "icon_custom_emoji_id": null,
+    "style": "primary"
+  },
+  "_test": {
+    "text": "Test",
+    "style": "primary"
+  }
+}

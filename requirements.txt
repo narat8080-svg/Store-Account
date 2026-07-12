@@ -1,0 +1,8 @@
+python-telegram-bot==22.7
+aiohttp==3.13.4
+python-dotenv==1.0.1
+qrcode[pil]>=7.4
+Pillow>=10.0
+bakong-khqr==0.5.7
+supabase>=2.31.0
+paramiko>=3.0
