@@ -32,7 +32,6 @@ from services.database import (
     calculate_discount,
     add_balance,  # used for negative balance (deduct)
 )
-from services.payment import auto_check_payment, create_khqr
 from services.khqrpay import create_checkout, poll_payment, get_khqrpay_config, verify_transaction
 
 # Admin imports
@@ -357,7 +356,7 @@ async def wallet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
         f"{E('wallet')} <b>My Wallet</b>\n\n"
         f"{E('balance_label')} Balance: <b>${balance:.2f}</b>\n\n"
-        "Tap <b>Deposit</b> to add funds via Bakong KHQR."
+        "Tap <b>Deposit</b> to add funds via KHQR (Bakong/ABA/Binance)."
     )
 
     await query.edit_message_text(
@@ -780,8 +779,8 @@ def _parse_pay_cb(data: str, prefix: str) -> tuple[int, int, int | None]:
 async def pay_confirm_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Show an order-summary screen with Confirm / Cancel before actually charging.
-    Handles both 'pay_wallet_<...>' and 'pay_bakong_<...>' callbacks.
-    Confirm → dispatches 'dowallet_<...>' or 'dobakong_<...>' which run the real handler.
+    Handles both 'pay_wallet_<...>' and 'pay_khqr_<...>' callbacks.
+    Confirm → dispatches 'dowallet_<...>' or 'dokhqr_<...>' which run the real handler.
     Cancel  → returns to product detail.
     """
     query = update.callback_query
@@ -792,8 +791,8 @@ async def pay_confirm_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE)
         method = "wallet"
         prefix = "pay_wallet_"
     else:
-        method = "bakong"
-        prefix = "pay_bakong_"
+        method = "khqr"
+        prefix = "pay_khqr_"
 
     try:
         prod_id, qty, promo_id = _parse_pay_cb(data, prefix)
@@ -822,11 +821,11 @@ async def pay_confirm_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
     total = unit_price * qty
 
-    method_label = "Wallet" if method == "wallet" else "Bakong KHQR"
+    method_label = "Wallet" if method == "wallet" else "KHQR"
 
     # Rebuild the callback body so the confirm button targets the SAME order.
     cb_body = data[len(prefix):]
-    confirm_cb = ("dowallet_" if method == "wallet" else "dobakong_") + cb_body
+    confirm_cb = ("dowallet_" if method == "wallet" else "dokhqr_") + cb_body
 
     text = (
         f"{emoji_for_html(prod['emoji'])} <b>Confirm Order</b>\n\n"
@@ -924,7 +923,7 @@ async def buy_execute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
         if balance < total_price:
             shortfall = total_price - balance
-            cb_pay = f"pay_bakong_{prod_id}_{qty}"
+            cb_pay = f"pay_khqr_{prod_id}_{qty}"
             if promo_data:
                 cb_pay += f"_promo_{promo_data['id']}"
             await query.edit_message_text(
@@ -932,10 +931,10 @@ async def buy_execute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 f"{E('price_label')} Total: <b>${total_price:.2f}</b>\n"
                 f"{E('balance_label')} Balance: <b>${balance:.2f}</b>\n"
                 f"{E('warning')} Need <b>${shortfall:.2f}</b> more.\n\n"
-                f"Pay directly with Bakong or top up your wallet.",
+                f"Pay directly with KHQR or top up your wallet.",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([
-                    [_make_smart_button(f"Pay with Bakong — ${total_price:.2f}", cb_pay, "pay_bakong")],
+                    [_make_smart_button(f"Pay with KHQR — ${total_price:.2f}", cb_pay, "pay_khqr")],
                     [_make_smart_button("Deposit", "wallet_deposit", "deposit")],
                     [_make_smart_button("Back", f"prod_cat_{prod['category_id']}", "back")],
                 ]),
@@ -1049,19 +1048,19 @@ def _get_supabase_for_promo(promo_id: int):
 
 
 # ===========================================================================
-# BAKONG DIRECT-PAY FOR ORDERS
+# KHQRPAY DIRECT-PAY FOR ORDERS
 # ===========================================================================
-async def pay_bakong_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def pay_khqr_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Handle 'dobakong_PRODID_QTY[_promo_PROMOID]' (post-confirm) or legacy
-    'pay_bakong_...': generate a KHQR for the total and start the auto-check loop.
+    Handle 'dokhqr_PRODID_QTY[_promo_PROMOID]' (post-confirm) or legacy
+    'pay_khqr_...': create a KHQRPay checkout and start the auto-check loop.
     On payment success, assign stock and deliver.
     """
     query = update.callback_query
     await query.answer()
 
     data = query.data or ""
-    prefix = "dobakong_" if data.startswith("dobakong_") else "pay_bakong_"
+    prefix = "dokhqr_" if data.startswith("dokhqr_") else "pay_khqr_"
     try:
         prod_id, qty, promo_id_from_cb = _parse_pay_cb(data, prefix)
     except (ValueError, IndexError):
@@ -1078,12 +1077,20 @@ async def pay_bakong_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         prod = get_product(conn, prod_id)
         is_unlimited = prod.get("is_unlimited", 0) if prod else 0
         stock_items = [] if is_unlimited else get_stock_for_product(conn, prod_id, unsold_only=True)
+        cfg = get_khqrpay_config(conn)
     finally:
         conn.close()
 
     if not prod:
         await query.edit_message_text(
             f"{E('error')} Product not found.",
+            reply_markup=_back_button("menu_product"),
+        )
+        return
+
+    if not cfg["profile_id"] or not cfg["secret_key"]:
+        await query.edit_message_text(
+            f"{E('error')} Payment gateway not configured.",
             reply_markup=_back_button("menu_product"),
         )
         return
@@ -1115,52 +1122,58 @@ async def pay_bakong_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 promo_data = None; discount = 0; unit_price = price
 
     total_price = unit_price * qty
-    order_ref = f"ORD-{uuid.uuid4().hex[:8].upper()}"
+    transaction_id = f"ORD-{uuid.uuid4().hex[:8].upper()}"
 
-    # Immediate feedback while the (slow) Bakong QR call runs.
-    try:
-        await query.edit_message_text(
-            f"{E('timer')} <b>Generating QR…</b>\n\n"
-            f"Waiting for Bakong to build your payment code.",
-            parse_mode="HTML",
-        )
-    except Exception:
-        pass
+    await query.edit_message_text(
+        f"{E('timer')} <b>Creating payment link…</b>\n\n"
+        f"Connecting to KHQRPay gateway.",
+        parse_mode="HTML",
+    )
 
-    # Generate KHQR
-    result = await create_khqr(total_price, order_ref)
+    result = await create_checkout(
+        profile_id=cfg["profile_id"],
+        secret_key=cfg["secret_key"],
+        transaction_id=transaction_id,
+        amount=total_price,
+        success_url="https://t.me",
+        remark=f"Order: {prod['name']} x{qty}",
+    )
+
     if not result["success"]:
         await query.edit_message_text(
-            f"{E('error')} Failed to generate QR: {result.get('error')}",
+            f"{E('error')} Failed to create payment: {result.get('error')}",
             reply_markup=_back_button("menu_product"),
         )
         return
 
-    # Record a pending payment so the auto-check task can mark it paid later
+    checkout_url = result["checkout_url"]
+
     conn = get_db()
     try:
-        payment_id = create_payment(conn, user.id, total_price, result["qr_text"], result["qr_md5"])
+        payment_id = create_payment(conn, user.id, total_price, checkout_url, transaction_id)
     finally:
         conn.close()
 
-    # Send the QR image with countdown; then background-check the payment
     caption = (
-        f"{E('buy')} <b>Pay ${total_price:.2f} with Bakong</b>\n\n"
+        f"{E('buy')} <b>Pay ${total_price:.2f} via KHQR</b>\n\n"
         f"{emoji_for_html(prod['emoji'])} <b>{prod['name']}</b> × {qty}\n"
         f"{E('timer')} Expires in: <b>03:00</b>\n\n"
-        f"📱 Scan the QR with any Bakong-supported app."
+        f"Tap below to pay with Bakong, ABA, or Binance.\n"
+        f"<i>Order: <code>{transaction_id}</code></i>"
     )
-    msg = await context.bot.send_photo(
+    msg = await context.bot.send_message(
         chat_id=query.message.chat_id,
-        photo=result["qr_image"],
-        caption=caption,
+        text=caption,
         parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("💳 Pay with KHQR", url=checkout_url)],
+        ]),
     )
 
-    # Fire the delivery task for this order
-    asyncio.create_task(_bakong_order_watcher(
+    asyncio.create_task(_khqrpay_order_watcher(
         payment_id=payment_id,
-        md5_hash=result["qr_md5"],
+        cfg=cfg,
+        transaction_id=transaction_id,
         amount=total_price,
         user_id=user.id,
         chat_id=query.message.chat_id,
@@ -1174,9 +1187,10 @@ async def pay_bakong_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     ))
 
 
-async def _bakong_order_watcher(
+async def _khqrpay_order_watcher(
     payment_id: int,
-    md5_hash: str,
+    cfg: dict,
+    transaction_id: str,
     amount: float,
     user_id: int,
     chat_id: int,
@@ -1188,29 +1202,27 @@ async def _bakong_order_watcher(
     original_price: float,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
-    """Poll Bakong for this order's payment; on success, assign stock and deliver."""
+    """Poll KHQRPay for order payment; on success, assign stock and deliver."""
     import time
     from services.database import mark_payment_paid, mark_payment_expired
-    from services.payment import check_payment
-    from config import QR_EXPIRE_SECONDS, PAYMENT_CHECK_INTERVAL
 
-    deadline = time.time() + QR_EXPIRE_SECONDS
+    deadline = time.time() + 180
     last_update = 0
 
     while time.time() < deadline:
         remaining = int(deadline - time.time())
 
-        # Countdown update every 10s
-        if time.time() - last_update >= 10:
+        if time.time() - last_update >= 15:
+            mins, secs = divmod(remaining, 60)
             try:
-                mins, secs = divmod(remaining, 60)
-                await context.bot.edit_message_caption(
+                await context.bot.edit_message_text(
                     chat_id=chat_id,
                     message_id=message_id,
-                    caption=(
-                        f"{E('buy')} <b>Pay ${amount:.2f} with Bakong</b>\n\n"
+                    text=(
+                        f"{E('buy')} <b>Pay ${amount:.2f} via KHQR</b>\n\n"
                         f"{E('timer')} Expires in: <b>{mins:02d}:{secs:02d}</b>\n\n"
-                        f"📱 Scan the QR with any Bakong-supported app."
+                        f"Tap below to pay.\n"
+                        f"<i>Order: <code>{transaction_id}</code></i>"
                     ),
                     parse_mode="HTML",
                 )
@@ -1218,7 +1230,7 @@ async def _bakong_order_watcher(
             except Exception:
                 pass
 
-        result = await check_payment(md5_hash)
+        result = await verify_transaction(cfg["profile_id"], cfg["secret_key"], transaction_id)
         if result.get("paid"):
             conn = get_db()
             try:
@@ -1229,12 +1241,11 @@ async def _bakong_order_watcher(
                 stock_items = [] if is_unlimited else get_stock_for_product(conn, prod_id, unsold_only=True)
 
                 if not is_unlimited and len(stock_items) < qty:
-                    # Stock ran out during the pending window — refund by crediting wallet.
                     add_balance(conn, user_id, amount)
                     try:
-                        await context.bot.edit_message_caption(
+                        await context.bot.edit_message_text(
                             chat_id=chat_id, message_id=message_id,
-                            caption=(
+                            text=(
                                 f"{E('warning')} <b>Out of Stock After Payment</b>\n\n"
                                 f"We received your ${amount:.2f} but stock ran out. "
                                 f"The amount was credited to your wallet."
@@ -1245,7 +1256,6 @@ async def _bakong_order_watcher(
                         pass
                     return
 
-                # Use promo now that payment cleared
                 if promo_data:
                     use_promo_code(conn, promo_data["id"])
 
@@ -1268,11 +1278,10 @@ async def _bakong_order_watcher(
             finally:
                 conn.close()
 
-            # Update the QR message to a success caption
             try:
-                await context.bot.edit_message_caption(
+                await context.bot.edit_message_text(
                     chat_id=chat_id, message_id=message_id,
-                    caption=(
+                    text=(
                         f"{E('success')} <b>Payment Received!</b>\n\n"
                         f"{emoji_for_html(prod['emoji'])} <b>{prod['name']}</b> × {qty}\n"
                         f"{E('price_label')} Paid: <b>${amount:.2f}</b>"
@@ -1313,35 +1322,35 @@ async def _bakong_order_watcher(
             # Order group notification
             try:
                 from config import ORDER_GROUP_ID
-                username_txt = f"ID:{user_id}"
-                await context.bot.send_message(
-                    chat_id=ORDER_GROUP_ID,
-                    text=(
-                        f"🛒 <b>New Order (Bakong)</b>\n\n"
-                        f"📦 {emoji_for_html(prod['emoji'])} <b>{prod['name']}</b> × {qty}\n"
-                        f"👤 User: {username_txt}\n"
-                        f"💰 Amount: <b>${amount:.2f}</b>"
-                        + (f"\n🎟 Promo: <code>{promo_data['code']}</code>" if promo_data else "")
-                    ),
-                    parse_mode="HTML",
-                )
+                if ORDER_GROUP_ID:
+                    await context.bot.send_message(
+                        chat_id=int(ORDER_GROUP_ID),
+                        text=(
+                            f"🛒 <b>New Order (KHQR)</b>\n\n"
+                            f"📦 {emoji_for_html(prod['emoji'])} <b>{prod['name']}</b> × {qty}\n"
+                            f"👤 <code>{user_id}</code>\n"
+                            f"💰 Amount: <b>${amount:.2f}</b>"
+                            + (f"\n🎟 Promo: <code>{promo_data['code']}</code>" if promo_data else "")
+                        ),
+                        parse_mode="HTML",
+                    )
             except Exception:
                 pass
             return
 
-        await asyncio.sleep(PAYMENT_CHECK_INTERVAL)
+        await asyncio.sleep(5)
 
-    # --- Expired ---
+    # Expired
     conn = get_db()
     try:
         mark_payment_expired(conn, payment_id)
     finally:
         conn.close()
     try:
-        await context.bot.edit_message_caption(
+        await context.bot.edit_message_text(
             chat_id=chat_id, message_id=message_id,
-            caption=(
-                f"{E('expired')} <b>QR Expired</b>\n\n"
+            text=(
+                f"{E('expired')} <b>Payment Expired</b>\n\n"
                 f"The payment window for <b>${amount:.2f}</b> closed. Try again if you still want to buy."
             ),
             parse_mode="HTML",
@@ -1676,12 +1685,12 @@ async def _route_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, da
     # --- Buy Flow ---
     elif data.startswith("buy_detail_"):
         await buy_detail(update, context)
-    elif data.startswith("pay_wallet_") or data.startswith("pay_bakong_"):
+    elif data.startswith("pay_wallet_") or data.startswith("pay_khqr_"):
         await pay_confirm_prompt(update, context)
     elif data.startswith("dowallet_"):
         await buy_execute(update, context)
-    elif data.startswith("dobakong_"):
-        await pay_bakong_start(update, context)
+    elif data.startswith("dokhqr_"):
+        await pay_khqr_start(update, context)
     elif data.startswith("apply_promo_"):
         await apply_promo_start(update, context)
 
@@ -2000,7 +2009,7 @@ async def _handle_custom_qty(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def _send_pay_options(chat_id: int, context: ContextTypes.DEFAULT_TYPE,
                             prod: dict, qty: int, edit_query=None) -> None:
     """
-    Show product summary + Pay with Wallet / Pay with Bakong / Apply Promo / Cancel.
+    Show product summary + Pay with Wallet / Pay with KHQR / Apply Promo / Cancel.
     If `edit_query` is given, edit that callback's message; otherwise send a new one.
     """
     prod_id = prod["id"]
@@ -2036,8 +2045,8 @@ async def _send_pay_options(chat_id: int, context: ContextTypes.DEFAULT_TYPE,
     keyboard = [
         [_make_smart_button(f"Pay with Wallet — ${total:.2f}",
                             f"pay_wallet_{cb_suffix}", "pay_wallet")],
-        [_make_smart_button(f"Pay with Bakong — ${total:.2f}",
-                            f"pay_bakong_{cb_suffix}", "pay_bakong")],
+        [_make_smart_button(f"Pay with KHQR — ${total:.2f}",
+                            f"pay_khqr_{cb_suffix}", "pay_khqr")],
         [_make_smart_button("Apply Promo Code", f"apply_promo_{prod_id}", "apply_promo")],
         [_make_smart_button("Cancel", f"prod_cat_{prod['category_id']}", "cancel")],
     ]
