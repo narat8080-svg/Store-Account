@@ -574,9 +574,6 @@ BTN_STYLE_LABELS = {
     None: "⚪ Default",
 }
 
-VALID_BTN_STYLES = ["primary", "success", "danger"]
-
-
 def get_button_style(key: str) -> str | None:
     """Get the style for a button key from config."""
     cfg = load_button_config()
@@ -593,8 +590,3 @@ def set_button_style(key: str, style: str | None) -> None:
         cfg[key] = {"text": None, "icon_custom_emoji_id": None, "style": None}
     cfg[key]["style"] = style
     save_button_config(cfg)
-
-
-def reset_button_style(key: str) -> None:
-    """Reset a button style to null."""
-    set_button_style(key, None)

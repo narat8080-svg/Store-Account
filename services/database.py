@@ -3,7 +3,6 @@ Database layer — Supabase (PostgreSQL) backend.
 Same function signatures as the old SQLite version.
 All bot/admin code works unchanged.
 """
-import os
 import logging
 import sys
 from config import SUPABASE_URL, SUPABASE_KEY
@@ -83,16 +82,6 @@ def mark_payment_paid(conn, payment_id):
 def mark_payment_expired(conn, payment_id):
     _get_supabase().table('payments').update({'status': 'expired'}).eq('id', payment_id).execute()
 
-def get_payment_by_txn(conn, transaction_id: str):
-    """Find a payment by our internal transaction_id (stored in qr_md5)."""
-    r = _get_supabase().table('payments').select('*').eq('qr_md5', transaction_id).execute()
-    return _row(r.data[0]) if r.data else None
-
-
-def get_payment(conn, payment_id):
-    r = _get_supabase().table('payments').select('*').eq('id', payment_id).execute()
-    return _row(r.data[0]) if r.data else None
-
 # === CATEGORIES ===
 def add_category(conn, name, emoji='📂'):
     try:
@@ -157,10 +146,6 @@ def delete_product(conn, product_id):
     _get_supabase().table('products').update({'is_active': 0}).eq('id', product_id).execute()
 
 # === STOCK ===
-def add_stock(conn, product_id, detail):
-    r = _get_supabase().table('stock').insert({'product_id': product_id, 'detail': detail}).execute()
-    return r.data[0]['id'] if r.data else 0
-
 def add_stock_bulk(conn, product_id, details):
     rows = [{'product_id': product_id, 'detail': d} for d in details]
     _get_supabase().table('stock').insert(rows).execute()
@@ -435,9 +420,6 @@ def search_orders(conn, query, limit=30):
             if ur.data: o['first_name'] = ur.data[0].get('first_name',''); o['user_username'] = ur.data[0].get('username','')
     return orders[:limit]
 
-def update_order_status(conn, order_id, status):
-    _get_supabase().table('orders').update({'status': status}).eq('id', order_id).execute()
-
 def refund_order(conn, order_id):
     s = _get_supabase()
     r = s.table('orders').select('*').eq('id', order_id).execute()
@@ -466,19 +448,6 @@ def get_users_with_stats(conn, limit=50):
 def set_user_vip(conn, user_id, tier, discount_pct=0):
     _get_supabase().table('users').update({'vip_tier': tier, 'discount_percent': discount_pct}).eq('user_id', user_id).execute()
 
-def search_users(conn, query, limit=20):
-    s = _get_supabase()
-    try:
-        uid = int(query)
-        r = s.table('users').select('*').eq('user_id', uid).execute()
-    except ValueError:
-        r = s.table('users').select('*').ilike('username', '%' + query + '%').execute()
-    users = _rows(r.data)[:limit]
-    for u in users:
-        or_ = s.table('orders').select('amount').eq('user_id', u['user_id']).execute()
-        u['total_spent'] = sum(float(o.get('amount',0)) for o in (or_.data or []))
-        u['order_count'] = len(or_.data) if or_.data else 0
-    return users
 
 # === EXPORT ===
 def export_orders_csv(conn):

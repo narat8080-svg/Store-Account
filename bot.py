@@ -22,8 +22,6 @@ from services.database import (
     get_or_create_user,
     get_order_count,
     create_payment,
-    get_all_categories,
-    get_products_by_category,
     get_product,
     get_stock_for_product,
     mark_stock_sold,
@@ -232,43 +230,31 @@ def _back_button(target: str = "menu_start") -> InlineKeyboardMarkup:
 # ===========================================================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show the welcome message with main menu buttons. Checks maintenance mode."""
-    # Maintenance mode check (non-admin users)
     user = update.effective_user
-    # Register every user who touches /start so admin's user list is complete,
-    # regardless of Telegram Premium status.
-    if user:
-        try:
-            conn = get_db()
-            try:
-                get_or_create_user(conn, user.id, user.username, user.first_name)
-            finally:
-                conn.close()
-        except Exception as e:
-            logger.warning(f"start(): could not register user {user.id}: {e}")
 
-    if user.id != ADMIN_ID:
-        conn = get_db()
-        try:
+    # Single DB connection for all checks
+    conn = get_db()
+    try:
+        # Register user
+        if user:
+            get_or_create_user(conn, user.id, user.username, user.first_name)
+
+        # Maintenance mode check (non-admin users)
+        if user.id != ADMIN_ID:
             from services.database import get_bot_setting
             mode = get_bot_setting(conn, "maintenance_mode", "off")
             if mode == "on":
                 msg = get_bot_setting(conn, "maintenance_msg", "Bot is under maintenance. Please try again later.")
                 if update.message:
                     await update.message.reply_html(f"🚧 {msg}")
-                conn.close()
                 return
-        finally:
-            conn.close()
 
-    welcome_text = (
-        f"{E('welcome')} <b>Welcome to Rat Store!</b>\n\n"
-        "Your one-stop shop for premium digital accounts.\n"
-        "Choose an option below to get started:"
-    )
-
-    # Check for custom welcome message from admin settings
-    conn = get_db()
-    try:
+        # Welcome message — check for custom
+        welcome_text = (
+            f"{E('welcome')} <b>Welcome to Rat Store!</b>\n\n"
+            "Your one-stop shop for premium digital accounts.\n"
+            "Choose an option below to get started:"
+        )
         from services.database import get_bot_setting
         custom = get_bot_setting(conn, "welcome_msg", "")
         if custom:
@@ -567,14 +553,6 @@ async def product_categories(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
 
-async def product_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Legacy category-scoped product list.
-    Categories are hidden from the user flow now, so any surviving `prod_cat_<id>`
-    Back link falls through to the flat product view.
-    """
-    await product_categories(update, context)
-    return
 
 
 # ===========================================================================
@@ -803,7 +781,6 @@ async def buy_execute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         total_price = unit_price * qty
 
         if balance < total_price:
-            conn.close()
             shortfall = total_price - balance
             cb_pay = f"pay_bakong_{prod_id}_{qty}"
             if promo_data:
@@ -1552,7 +1529,7 @@ async def _route_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, da
     elif data == "menu_product":
         await product_categories(update, context)
     elif data.startswith("prod_cat_"):
-        await product_list(update, context)
+        await product_categories(update, context)
 
     # --- Buy Flow ---
     elif data.startswith("buy_detail_"):

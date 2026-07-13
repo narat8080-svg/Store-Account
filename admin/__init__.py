@@ -3344,7 +3344,6 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 update_product(conn, prod_id, category_id=int(text))
         except (ValueError, TypeError):
             await update.message.reply_html("❌ Invalid value.", reply_markup=_cancel_button("admin_products"))
-            conn.close()
             return
         finally:
             conn.close()
