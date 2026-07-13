@@ -32,7 +32,7 @@ from services.database import (
     calculate_discount,
     add_balance,  # used for negative balance (deduct)
 )
-from services.khqrpay import create_checkout, poll_payment, get_khqrpay_config, verify_transaction
+from services.khqrpay import create_aba_checkout, poll_payment, get_khqrpay_config, verify_transaction
 
 # Admin imports
 from admin import (
@@ -398,9 +398,9 @@ async def deposit_amounts(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     buttons.append([_make_smart_button("Back", "menu_wallet", "back")])
 
     text = (
-        f"{E('deposit')} <b>Deposit via KHQR</b>\n\n"
+        f"{E('deposit')} <b>Deposit via ABA Pay / KHQR</b>\n\n"
         f"Select an amount to top up:\n"
-        f"📱 Supports Bakong · ABA Pay · Binance\n"
+        f"📱 ABA Pay · Bakong · Binance\n"
         f"{E('timer')} Session expires in <b>3 minutes</b>."
     )
 
@@ -464,7 +464,7 @@ async def deposit_create_checkout(update: Update, context: ContextTypes.DEFAULT_
         parse_mode="HTML",
     )
 
-    result = await create_checkout(
+    result = await create_aba_checkout(
         profile_id=cfg["profile_id"],
         secret_key=cfg["secret_key"],
         transaction_id=transaction_id,
@@ -1130,7 +1130,7 @@ async def pay_khqr_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         parse_mode="HTML",
     )
 
-    result = await create_checkout(
+    result = await create_aba_checkout(
         profile_id=cfg["profile_id"],
         secret_key=cfg["secret_key"],
         transaction_id=transaction_id,
@@ -2091,7 +2091,7 @@ async def _handle_custom_deposit(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     transaction_id = f"RAT-{uuid.uuid4().hex[:8].upper()}"
-    result = await create_checkout(
+    result = await create_aba_checkout(
         profile_id=cfg["profile_id"],
         secret_key=cfg["secret_key"],
         transaction_id=transaction_id,

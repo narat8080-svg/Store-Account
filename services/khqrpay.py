@@ -2,23 +2,32 @@
 KHQRPay Payment Gateway Integration (khqr.cc)
 
 Supports Bakong KHQR, ABA Pay, Binance Pay via a unified checkout page.
-- create_checkout() → returns checkout URL for user to pay
+- create_checkout() → returns checkout URL (v1 — general KHQR)
+- create_aba_checkout() → returns ABA Pay checkout URL (v2 — live QR + ABA deep link)
 - verify_transaction() → checks if payment is completed
 """
 import asyncio
 import hashlib
 import logging
 from typing import Optional
+from urllib.parse import urlencode
 
 import aiohttp
 
 logger = logging.getLogger(__name__)
 
 KHQRPAY_BASE = "https://khqr.cc/api"
+KHQRPAY_CHECKOUT_BASE = "https://checkout.khqr.cc/payment/khqrcc"
 
 
 def _sha1(*parts: str) -> str:
     return hashlib.sha1("".join(parts).encode("utf-8")).hexdigest()
+
+
+def _build_checkout_url(endpoint: str, profile_id: str, params: dict) -> str:
+    """Build a KHQRPay checkout URL with proper encoding."""
+    base = f"{KHQRPAY_BASE}/{endpoint}/{profile_id}"
+    return f"{base}?{urlencode(params)}"
 
 
 async def create_checkout(
@@ -30,7 +39,7 @@ async def create_checkout(
     remark: str = "",
 ) -> dict:
     """
-    Create a KHQRPay checkout session.
+    Create a KHQRPay checkout session (v1 — general KHQR/Bakong).
 
     Returns:
         {"success": True, "checkout_url": "https://..."}
@@ -47,18 +56,78 @@ async def create_checkout(
         "hash": hash_val,
     }
 
-    checkout_url = f"{KHQRPAY_BASE}/payment/request/{profile_id}"
+    final_url = _build_checkout_url("payment/request", profile_id, params)
 
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(checkout_url, params=params, timeout=30) as resp:
-                # The gateway redirects; we just need the constructed URL
-                # Return the URL that the user should visit
-                qs = "&".join(f"{k}={v}" for k, v in params.items())
-                final_url = f"{checkout_url}?{qs}"
-                return {"success": True, "checkout_url": final_url}
+            async with session.get(final_url, timeout=30, allow_redirects=False) as resp:
+                if resp.status in (200, 302, 303, 307, 308):
+                    return {"success": True, "checkout_url": final_url}
+                try:
+                    body = await resp.text()
+                    logger.warning(f"KHQRPay create_checkout returned {resp.status}: {body[:200]}")
+                except Exception:
+                    body = ""
+                return {"success": False, "error": f"Gateway error ({resp.status})" if not body else body[:200]}
+    except asyncio.TimeoutError:
+        logger.error("KHQRPay create_checkout timeout")
+        return {"success": True, "checkout_url": final_url}
     except Exception as e:
         logger.error(f"KHQRPay create_checkout error: {e}")
+        return {"success": False, "error": str(e)}
+
+
+async def create_aba_checkout(
+    profile_id: str,
+    secret_key: str,
+    transaction_id: str,
+    amount: float,
+    success_url: str = "https://t.me",
+    remark: str = "",
+) -> dict:
+    """
+    Create an ABA Pay checkout session (v2 — live KHQR + ABA Mobile deep link).
+
+    Uses the /payment/requestv2 endpoint which shows:
+    - Live KHQR code verified by Bakong
+    - "Open in ABA Mobile" button for one-tap payment
+
+    Returns:
+        {"success": True, "checkout_url": "https://...", "direct_url": "https://checkout.khqr.cc/..."}
+        {"success": False, "error": "..."}
+    """
+    amount_str = f"{amount:.2f}"
+    # Same hash formula: sha1(secret + id + amount + url + remark)
+    hash_val = _sha1(secret_key, transaction_id, amount_str, success_url, remark)
+
+    params = {
+        "transaction_id": transaction_id,
+        "amount": amount_str,
+        "success_url": success_url,
+        "remark": remark,
+        "hash": hash_val,
+    }
+
+    final_url = _build_checkout_url("payment/requestv2", profile_id, params)
+    # Direct frontend checkout URL (can be used as a clean link)
+    direct_url = f"{KHQRPAY_CHECKOUT_BASE}/{profile_id}"
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(final_url, timeout=30, allow_redirects=False) as resp:
+                if resp.status in (200, 302, 303, 307, 308):
+                    return {"success": True, "checkout_url": final_url, "direct_url": direct_url}
+                try:
+                    body = await resp.text()
+                    logger.warning(f"KHQRPay create_aba_checkout returned {resp.status}: {body[:200]}")
+                except Exception:
+                    body = ""
+                return {"success": False, "error": f"Gateway error ({resp.status})" if not body else body[:200]}
+    except asyncio.TimeoutError:
+        logger.error("KHQRPay create_aba_checkout timeout")
+        return {"success": True, "checkout_url": final_url, "direct_url": direct_url}
+    except Exception as e:
+        logger.error(f"KHQRPay create_aba_checkout error: {e}")
         return {"success": False, "error": str(e)}
 
 
