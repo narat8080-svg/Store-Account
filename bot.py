@@ -1496,16 +1496,16 @@ async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     for o in orders:
         db_emoji = o.get("product_emoji", "📦")
         emoji = emoji_for_button(db_emoji)
-        name = o.get("product_name", "Unknown")
-        date = o.get("created_at", "")[:10]
-        text = f"{emoji} {name} — ${o['amount']:.2f} | {date}"
+        name = o.get("product_name") or f"Product #{o.get('product_id', '?')}"
+        date = (o.get("created_at", "")[:10] or "?")
+        btn_text = f"{emoji} {name} — ${o['amount']:.2f} | {date}"
         pid = emoji_premium_id(db_emoji)
         icon_id = str(pid) if pid else None
         if pid:
             plain, _ = parse_db_emoji(db_emoji)
-            if text.startswith(plain):
-                text = text[len(plain):].strip()
-        buttons.append([_safe_button(text, f"order_detail_{o['id']}", icon_id)])
+            if btn_text.startswith(plain):
+                btn_text = btn_text[len(plain):].strip()
+        buttons.append([_safe_button(btn_text, f"order_detail_{o['id']}", icon_id)])
 
     buttons.append([_make_smart_button("Back", "menu_start", "back")])
 
@@ -1532,25 +1532,35 @@ async def order_detail(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     detail = order.get("stock_detail", "No data")
-    name = order.get("product_name", "Unknown")
+    name = order.get("product_name") or f"Product #{order.get('product_id', '?')}"
     emoji = emoji_for_html(order.get("product_emoji", "📦"))
-    date = order.get("created_at", "")[:16].replace("T", " ")
+    # Full datetime: 2026-07-13 15:56
+    date_full = (order.get("created_at", "")[:16] or "?").replace("T", " ")
+    date_short = (order.get("created_at", "")[:10] or "?")
 
-    # Send file
-    file_bytes = io.BytesIO(detail.encode("utf-8"))
-    file_bytes.name = f"order_{order_id}_{name.replace(' ','_')}.txt"
+    # Build file content with date/time header
+    file_content = (
+        f"🛒 Order #{order_id}\n"
+        f"📦 Product: {name}\n"
+        f"💰 Amount: ${order['amount']:.2f}\n"
+        f"📅 Date: {date_full}\n"
+        f"{'─' * 30}\n\n"
+        f"{detail}"
+    )
+    file_bytes = io.BytesIO(file_content.encode("utf-8"))
+    file_bytes.name = f"order_{order_id}_{name.replace(' ','_')[:20]}.txt"
     await context.bot.send_document(
         chat_id=query.message.chat_id,
         document=file_bytes,
-        caption=f"📄 {emoji} <b>{name}</b> — ${order['amount']:.2f}\n📅 {date}",
+        caption=f"📄 {emoji} <b>{name}</b> — ${order['amount']:.2f}\n📅 {date_full}",
         parse_mode="HTML",
     )
 
     await query.edit_message_text(
         f"{emoji} <b>{name}</b>\n\n"
         f"💰 Amount: <b>${order['amount']:.2f}</b>\n"
-        f"📅 Date: {date}\n\n"
-        f"<i>Account file sent above.</i>",
+        f"📅 Date: {date_full}\n\n"
+        f"<i>Account details in the file above.</i>",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([
             [_make_smart_button("Back to Orders", "menu_myorder", "back")],
