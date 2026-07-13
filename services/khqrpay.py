@@ -53,11 +53,18 @@ async def create_aba_qr(
     }
 
     url = _api_url(profile_id, "qr-api-khqrcc")
+    logger.info(f"KHQRPay QR API → {url} | txn={transaction_id} | amt={amount_str}")
 
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(url, data=payload, timeout=30) as resp:
-                data = await resp.json()
+                raw = await resp.text()
+                logger.info(f"KHQRPay QR API ← {resp.status} | body={raw[:300]}")
+
+                try:
+                    data = __import__('json').loads(raw)
+                except Exception:
+                    return {"success": False, "error": f"Invalid JSON response (HTTP {resp.status})"}
 
                 if data.get("responseCode") == 0 and data.get("data"):
                     tx_data = data["data"]
@@ -71,7 +78,7 @@ async def create_aba_qr(
                     }
 
                 error_msg = data.get("responseMessage", f"API error (code {data.get('responseCode')})")
-                logger.warning(f"KHQRPay QR API failed: {error_msg}")
+                logger.warning(f"KHQRPay QR API failed: {error_msg} | full={raw[:500]}")
                 return {"success": False, "error": error_msg}
 
     except asyncio.TimeoutError:
@@ -105,7 +112,11 @@ async def verify_aba_payment(
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(url, data=payload, timeout=30) as resp:
-                data = await resp.json()
+                raw = await resp.text()
+                try:
+                    data = __import__('json').loads(raw)
+                except Exception:
+                    return {"success": True, "paid": False}
 
                 if data.get("responseCode") == 0 and data.get("data"):
                     tx_data = data["data"]
@@ -116,7 +127,6 @@ async def verify_aba_payment(
                         "amount": tx_data.get("amount", ""),
                     }
 
-                # responseCode != 0 means error (invalid hash, not found, etc.)
                 return {"success": True, "paid": False}
 
     except Exception as e:
