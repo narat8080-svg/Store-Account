@@ -2509,7 +2509,8 @@ async def admin_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             callback_data="admin_settings_maintenance"
         )],
         [InlineKeyboardButton("📝 Edit Welcome Message", callback_data="admin_settings_welcome")],
-        [InlineKeyboardButton("🔔 Admin Notifications", callback_data="admin_settings_notify")],
+        [InlineKeyboardButton("� Payment Gateway", callback_data="admin_settings_payment")],
+        [InlineKeyboardButton("�🔔 Admin Notifications", callback_data="admin_settings_notify")],
         [InlineKeyboardButton(
             f"📢 Restock Alerts: {'ON 🔔' if restock == 'on' else 'OFF 🔕'}",
             callback_data="admin_settings_restock"
@@ -2610,6 +2611,82 @@ async def admin_settings_restock(update: Update, context: ContextTypes.DEFAULT_T
         reply_markup=InlineKeyboardMarkup([[
             InlineKeyboardButton("🔙 Back", callback_data="admin_settings")
         ]])
+    )
+
+
+# ===========================================================================
+# PAYMENT GATEWAY SETTINGS (KHQRPay)
+# ===========================================================================
+async def admin_settings_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show KHQRPay payment gateway config."""
+    query = update.callback_query
+    await query.answer()
+
+    from services.khqrpay import get_khqrpay_config
+
+    conn = get_db()
+    try:
+        cfg = get_khqrpay_config(conn)
+    finally:
+        conn.close()
+
+    pid = cfg["profile_id"] or "Not set"
+    sk = (cfg["secret_key"][:4] + "****" + cfg["secret_key"][-4:]) if cfg["secret_key"] else "Not set"
+    aba = cfg["aba_url"] or "Not set"
+
+    keyboard = [
+        [InlineKeyboardButton("🆔 Set Profile ID", callback_data="admin_pay_profile")],
+        [InlineKeyboardButton("🔑 Set Secret Key", callback_data="admin_pay_secret")],
+        [InlineKeyboardButton("🔗 Set ABA Pay URL", callback_data="admin_pay_aba")],
+        [InlineKeyboardButton("🔙 Back", callback_data="admin_settings")],
+    ]
+
+    await query.edit_message_text(
+        f"💳 <b>Payment Gateway — KHQRPay</b>\n\n"
+        f"🆔 Profile ID: <code>{pid}</code>\n"
+        f"🔑 Secret Key: <code>{sk}</code>\n"
+        f"🔗 ABA Pay URL: <code>{aba}</code>\n\n"
+        f"<i>Supports Bakong KHQR, ABA Pay, Binance Pay.</i>",
+        parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def admin_pay_set_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Prompt admin to enter new Profile ID."""
+    query = update.callback_query
+    await query.answer()
+    context.user_data["admin_state"] = "pay_profile"
+    await query.edit_message_text(
+        "🆔 <b>Set KHQRPay Profile ID</b>\n\n"
+        "Send the Profile ID from your khqr.cc merchant dashboard:\n"
+        "<i>Example: TDS8ztn3Y21bSq3b5J5BXUWDRfzOIzwP</i>",
+        parse_mode="HTML", reply_markup=_cancel_button("admin_settings_payment"),
+    )
+
+
+async def admin_pay_set_secret(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Prompt admin to enter new Secret Key."""
+    query = update.callback_query
+    await query.answer()
+    context.user_data["admin_state"] = "pay_secret"
+    await query.edit_message_text(
+        "🔑 <b>Set KHQRPay Secret Key</b>\n\n"
+        "Send the Secret Key from your khqr.cc merchant dashboard:\n"
+        "<i>⚠️ This is sensitive — never share it.</i>",
+        parse_mode="HTML", reply_markup=_cancel_button("admin_settings_payment"),
+    )
+
+
+async def admin_pay_set_aba(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Prompt admin to enter new ABA Pay URL."""
+    query = update.callback_query
+    await query.answer()
+    context.user_data["admin_state"] = "pay_aba"
+    await query.edit_message_text(
+        "🔗 <b>Set ABA Pay URL</b>\n\n"
+        "Send the ABA Pay link URL:\n"
+        "<i>Example: https://link.payway.com.kh/ABAPAY5h478304I</i>",
+        parse_mode="HTML", reply_markup=_cancel_button("admin_settings_payment"),
     )
 
 
@@ -3083,14 +3160,16 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             f"✅ Emoji set!\n\n"
             f"Now send a <b>description</b> for this product (Step 4/4):\n"
             f"<i>Example: Premium account with 5TB storage, 18 months validity.</i>\n\n"
+            f"<b>Formatting:</b> <b>Bold</b>, <i>Italic</i>, <code>Code</code>, premium emoji supported.\n"
             f"Send <b>/skip</b> to skip.",
             reply_markup=_cancel_button("admin_products"),
         )
 
     # --- Product Description ---
     elif state == "prod_desc":
-        desc = text.strip()
-        if desc.lower() == "/skip":
+        # Use _message_to_html to capture rich formatting (bold, italic, code, premium emoji)
+        desc = _message_to_html(update.message) if update.message.text else ""
+        if update.message.text and update.message.text.strip().lower() == "/skip":
             desc = ""
         cat_id = data.get("cat_id")
         name = data.get("name", "Product")
@@ -3106,12 +3185,9 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         context.user_data.pop("admin_state", None)
         context.user_data.pop("admin_data", None)
 
-        # HTML-escape the description to prevent parse errors
-        from html import escape as html_escape
-        desc_safe = html_escape(desc, quote=False) if desc else ""
         await update.message.reply_html(
-            f"✅ Product created!\n\n{emoji_for_html(emoji)} <b>{html_escape(name, quote=False)}</b> — ${price:.2f}"
-            + (f"\n📝 <i>{desc_safe}</i>" if desc_safe else ""),
+            f"✅ Product created!\n\n{emoji_for_html(emoji)} <b>{name}</b> — ${price:.2f}"
+            + (f"\n📝 {desc}" if desc else ""),
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("📦 Back to Products", callback_data="admin_products"),
                 InlineKeyboardButton("🏠 Admin Panel", callback_data="admin_panel"),
@@ -3757,6 +3833,64 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             ]])
         )
 
+    # --- Payment Gateway: Profile ID ---
+    elif state == "pay_profile":
+        if not text:
+            await update.message.reply_html("❌ Profile ID cannot be empty.", reply_markup=_cancel_button("admin_settings_payment"))
+            return
+        conn = get_db()
+        try:
+            set_bot_setting(conn, "khqrpay_profile_id", text)
+        finally:
+            conn.close()
+        context.user_data.pop("admin_state", None)
+        context.user_data.pop("admin_data", None)
+        await update.message.reply_html(
+            f"✅ Profile ID updated to: <code>{text}</code>",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("💳 Back to Payment Settings", callback_data="admin_settings_payment"),
+            ]])
+        )
+
+    # --- Payment Gateway: Secret Key ---
+    elif state == "pay_secret":
+        if not text:
+            await update.message.reply_html("❌ Secret Key cannot be empty.", reply_markup=_cancel_button("admin_settings_payment"))
+            return
+        conn = get_db()
+        try:
+            set_bot_setting(conn, "khqrpay_secret_key", text)
+        finally:
+            conn.close()
+        context.user_data.pop("admin_state", None)
+        context.user_data.pop("admin_data", None)
+        masked = text[:4] + "****" + text[-4:] if len(text) > 8 else "****"
+        await update.message.reply_html(
+            f"✅ Secret Key updated to: <code>{masked}</code>",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("💳 Back to Payment Settings", callback_data="admin_settings_payment"),
+            ]])
+        )
+
+    # --- Payment Gateway: ABA URL ---
+    elif state == "pay_aba":
+        if not text:
+            await update.message.reply_html("❌ ABA URL cannot be empty.", reply_markup=_cancel_button("admin_settings_payment"))
+            return
+        conn = get_db()
+        try:
+            set_bot_setting(conn, "khqrpay_aba_url", text)
+        finally:
+            conn.close()
+        context.user_data.pop("admin_state", None)
+        context.user_data.pop("admin_data", None)
+        await update.message.reply_html(
+            f"✅ ABA Pay URL updated to: <code>{text}</code>",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("💳 Back to Payment Settings", callback_data="admin_settings_payment"),
+            ]])
+        )
+
     # --- Backup Restore Upload ---
     elif state == "backup_restore_upload":
         if not update.message.document:
@@ -3847,6 +3981,10 @@ def _message_to_html(message) -> str:
             placeholders[pid] = f"<i>{html_escape(segment, quote=False)}</i>"
         elif entity.type == "code":
             placeholders[pid] = f"<code>{html_escape(segment, quote=False)}</code>"
+        elif entity.type == "underline":
+            placeholders[pid] = f"<u>{html_escape(segment, quote=False)}</u>"
+        elif entity.type == "strikethrough":
+            placeholders[pid] = f"<s>{html_escape(segment, quote=False)}</s>"
         else:
             continue
 

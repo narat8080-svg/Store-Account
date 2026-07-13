@@ -12,7 +12,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
 # ---------------------------------------------------------------------------
-# Bakong KHQR
+# Bakong KHQR (legacy SDK — kept for backward compatibility)
 # ---------------------------------------------------------------------------
 BAKONG_API_TOKEN = os.getenv("BAKONG_API_TOKEN", "")
 BAKONG_ACCOUNT = os.getenv("BAKONG_ACCOUNT", "")
@@ -22,6 +22,15 @@ MERCHANT_PHONE = os.getenv("MERCHANT_PHONE", "")
 # Bakong API endpoints (fallback if SDK fails)
 BAKONG_CREATE_QR_URL = "https://api-bakong.nbc.gov.kh/v1/khqr/create"
 BAKONG_CHECK_PAYMENT_URL = "https://api-bakong.nbc.gov.kh/v1/khqr/check"
+
+# ---------------------------------------------------------------------------
+# KHQRPay Payment Gateway (khqr.cc) — primary payment method
+# Supports Bakong KHQR + ABA Pay + Binance via unified checkout
+# Admin can override these via bot_settings → 💳 Payment Gateway
+# ---------------------------------------------------------------------------
+KHQRPAY_PROFILE_ID = os.getenv("KHQRPAY_PROFILE_ID", "")
+KHQRPAY_SECRET_KEY = os.getenv("KHQRPAY_SECRET_KEY", "")
+KHQRPAY_ABA_URL = os.getenv("KHQRPAY_ABA_URL", "")
 
 # ---------------------------------------------------------------------------
 # Payment settings

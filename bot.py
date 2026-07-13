@@ -33,6 +33,7 @@ from services.database import (
     add_balance,  # used for negative balance (deduct)
 )
 from services.payment import auto_check_payment, create_khqr
+from services.khqrpay import create_checkout, poll_payment, get_khqrpay_config, verify_transaction
 
 # Admin imports
 from admin import (
@@ -117,6 +118,11 @@ from admin import (
     admin_settings_welcome,
     admin_settings_notify,
     admin_settings_restock,
+    # Payment Gateway
+    admin_settings_payment,
+    admin_pay_set_profile,
+    admin_pay_set_secret,
+    admin_pay_set_aba,
     admin_export_csv,
     admin_button_styles,
     admin_button_section,
@@ -393,10 +399,10 @@ async def deposit_amounts(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     buttons.append([_make_smart_button("Back", "menu_wallet", "back")])
 
     text = (
-        f"{E('deposit')} <b>Deposit — Bakong KHQR</b>\n\n"
-        f"Select an amount to top up via Bakong KHQR.\n"
-        f"📱 You can pay with any Bakong-supported app.\n"
-        f"{E('timer')} QR expires in <b>3 minutes</b>."
+        f"{E('deposit')} <b>Deposit via KHQR</b>\n\n"
+        f"Select an amount to top up:\n"
+        f"📱 Supports Bakong · ABA Pay · Binance\n"
+        f"{E('timer')} Session expires in <b>3 minutes</b>."
     )
 
     await query.edit_message_text(
@@ -405,12 +411,12 @@ async def deposit_amounts(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def deposit_custom_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Prompt user to enter a custom deposit amount for Bakong KHQR."""
+    """Prompt user to enter a custom deposit amount for KHQRPay."""
     query = update.callback_query
     await query.answer()
     context.user_data["buy_state"] = "custom_deposit"
     await query.edit_message_text(
-        f"{E('deposit')} <b>Custom Deposit — Bakong KHQR</b>\n\n"
+        f"{E('deposit')} <b>Custom Deposit — KHQR</b>\n\n"
         f"Type the amount you want to deposit:\n"
         f"<i>Example: 3.50 or 25</i>",
         parse_mode="HTML",
@@ -421,15 +427,14 @@ async def deposit_custom_start(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 # ===========================================================================
-# DEPOSIT – Generate QR & Start Auto-Check
+# DEPOSIT – KHQRPay Checkout (Bakong + ABA + Binance)
 # ===========================================================================
-async def deposit_create_qr(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Generate Bakong QR for the selected amount and start auto-check."""
+async def deposit_create_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Create a KHQRPay checkout session and send payment button."""
     query = update.callback_query
     await query.answer()
 
     data = query.data or ""
-    # Accept both the old `deposit_amt_<n>` and the new `depamt_bakong_<n>`.
     raw = data.replace("depamt_bakong_", "").replace("deposit_amt_", "")
     try:
         amount = float(raw)
@@ -438,43 +443,73 @@ async def deposit_create_qr(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     user = query.from_user
-    order_id = f"RAT-{uuid.uuid4().hex[:8].upper()}"
+    transaction_id = f"RAT-{uuid.uuid4().hex[:8].upper()}"
 
-    await query.edit_message_text(
-        f"{E('timer')} Generating Bakong QR for <b>${amount:.2f}</b>...",
-        parse_mode="HTML",
-    )
-
-    result = await create_khqr(amount, order_id)
-
-    if not result["success"]:
-        await query.edit_message_text(
-            f"{E('error')} <b>QR Generation Failed</b>\n\n{result.get('error', 'Unknown error')}\n\n"
-            "Please try again later.",
-            parse_mode="HTML",
-            reply_markup=_back_button("wallet_deposit"),
-        )
-        return
-
-    qr_text = result["qr_text"]
-    qr_md5 = result["qr_md5"]
-    qr_image = result["qr_image"]
-
+    # Get KHQRPay config (bot_settings override env)
     conn = get_db()
     try:
-        payment_id = create_payment(conn, user.id, amount, qr_text, qr_md5)
+        cfg = get_khqrpay_config(conn)
     finally:
         conn.close()
 
-    msg = await context.bot.send_photo(
-        chat_id=query.message.chat_id,
-        photo=qr_image,
-        caption=(
-            f"{E('deposit')} <b>Deposit ${amount:.2f}</b>\n\n"
-            f"📱 Scan the QR code with any Bakong app to pay.\n"
-            f"{E('timer')} Expires in: <b>03:00</b>"
-        ),
+    if not cfg["profile_id"] or not cfg["secret_key"]:
+        await query.edit_message_text(
+            f"{E('error')} Payment gateway not configured.\nContact admin to set up KHQRPay.",
+            parse_mode="HTML",
+            reply_markup=_back_button("menu_wallet"),
+        )
+        return
+
+    await query.edit_message_text(
+        f"{E('timer')} Creating payment link for <b>${amount:.2f}</b>...",
         parse_mode="HTML",
+    )
+
+    result = await create_checkout(
+        profile_id=cfg["profile_id"],
+        secret_key=cfg["secret_key"],
+        transaction_id=transaction_id,
+        amount=amount,
+        success_url="https://t.me",
+        remark=f"Deposit for user {user.id}",
+    )
+
+    if not result["success"]:
+        await query.edit_message_text(
+            f"{E('error')} <b>Payment Failed</b>\n\n{result.get('error', 'Unknown error')}",
+            parse_mode="HTML",
+            reply_markup=_back_button("menu_wallet"),
+        )
+        return
+
+    checkout_url = result["checkout_url"]
+
+    # Store pending payment
+    conn = get_db()
+    try:
+        payment_id = create_payment(conn, user.id, amount, checkout_url, transaction_id)
+    finally:
+        conn.close()
+
+    text = (
+        f"{E('deposit')} <b>Deposit ${amount:.2f}</b>\n\n"
+        f"Tap the button below to pay via KHQR:\n"
+        f"• Bakong KHQR\n"
+        f"• ABA Pay\n"
+        f"• Binance Pay (USDT)\n\n"
+        f"{E('timer')} Expires in: <b>03:00</b>\n"
+        f"<i>Order: <code>{transaction_id}</code></i>"
+    )
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("💳 Pay with KHQR", url=checkout_url)],
+        [_make_smart_button("Back to Wallet", "menu_wallet", "back")],
+    ])
+
+    msg = await context.bot.send_message(
+        chat_id=query.message.chat_id,
+        text=text,
+        parse_mode="HTML",
+        reply_markup=keyboard,
     )
 
     try:
@@ -482,17 +517,124 @@ async def deposit_create_qr(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     except Exception:
         pass
 
-    asyncio.create_task(
-        auto_check_payment(
-            payment_id=payment_id,
-            md5_hash=qr_md5,
-            amount=amount,
-            user_id=user.id,
-            chat_id=query.message.chat_id,
-            message_id=msg.message_id,
-            context=context,
+    # Background poll for payment
+    asyncio.create_task(_khqrpay_watcher(
+        payment_id=payment_id,
+        cfg=cfg,
+        transaction_id=transaction_id,
+        amount=amount,
+        user_id=user.id,
+        chat_id=query.message.chat_id,
+        message_id=msg.message_id,
+        context=context,
+    ))
+
+
+async def _khqrpay_watcher(
+    payment_id: int,
+    cfg: dict,
+    transaction_id: str,
+    amount: float,
+    user_id: int,
+    chat_id: int,
+    message_id: int,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Poll KHQRPay for payment confirmation, then credit balance."""
+    from services.database import mark_payment_paid, add_balance, get_db
+
+    # Countdown loop
+    import time
+    deadline = time.time() + 180
+    last_update = 0
+
+    while time.time() < deadline:
+        remaining = int(deadline - time.time())
+
+        # Update countdown every 15s
+        if time.time() - last_update >= 15:
+            mins, secs = divmod(remaining, 60)
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=(
+                        f"{E('deposit')} <b>Deposit ${amount:.2f}</b>\n\n"
+                        f"Tap the button below to pay via KHQR.\n"
+                        f"{E('timer')} Expires in: <b>{mins:02d}:{secs:02d}</b>\n"
+                        f"<i>Order: <code>{transaction_id}</code></i>"
+                    ),
+                    parse_mode="HTML",
+                )
+                last_update = time.time()
+            except Exception:
+                pass
+
+        result = await verify_transaction(cfg["profile_id"], cfg["secret_key"], transaction_id)
+        if result.get("paid"):
+            conn = get_db()
+            try:
+                mark_payment_paid(conn, payment_id)
+                new_balance = add_balance(conn, user_id, amount)
+            finally:
+                conn.close()
+
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=(
+                        f"{E('success')} <b>Payment Confirmed!</b>\n\n"
+                        f"💰 Amount: <b>${amount:.2f}</b>\n"
+                        f"💳 New Balance: <b>${new_balance:.2f}</b>\n"
+                        f"🆔 <code>{transaction_id}</code>"
+                    ),
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
+
+            # Notify payment group
+            try:
+                from config import PAYMENT_GROUP_ID
+                if PAYMENT_GROUP_ID:
+                    await context.bot.send_message(
+                        chat_id=int(PAYMENT_GROUP_ID),
+                        text=(
+                            f"💵 <b>Deposit Received</b>\n\n"
+                            f"👤 <code>{user_id}</code>\n"
+                            f"💰 ${amount:.2f}\n"
+                            f"🆔 <code>{transaction_id}</code>"
+                        ),
+                        parse_mode="HTML",
+                    )
+            except Exception:
+                pass
+            return
+
+        await asyncio.sleep(5)
+
+    # Expired
+    conn = get_db()
+    try:
+        from services.database import mark_payment_expired
+        mark_payment_expired(conn, payment_id)
+    finally:
+        conn.close()
+
+    try:
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=(
+                f"{E('expired')} <b>Payment Expired</b>\n\n"
+                f"The payment window for <b>${amount:.2f}</b> has closed.\n"
+                f"Try again if you still want to deposit."
+            ),
+            parse_mode="HTML",
         )
-    )
+    except Exception:
+        pass
 
 
 
@@ -1519,7 +1661,7 @@ async def _route_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, da
     elif data == "wallet_deposit":
         await deposit_menu(update, context)
     elif data.startswith("depamt_bakong_") or data.startswith("deposit_amt_"):
-        await deposit_create_qr(update, context)
+        await deposit_create_checkout(update, context)
     elif data == "deposit_custom":
         await deposit_custom_start(update, context)
     elif data == "menu_start":
@@ -1742,6 +1884,14 @@ async def _route_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, da
         await admin_settings_notify(update, context)
     elif data == "admin_settings_restock":
         await admin_settings_restock(update, context)
+    elif data == "admin_settings_payment":
+        await admin_settings_payment(update, context)
+    elif data == "admin_pay_profile":
+        await admin_pay_set_profile(update, context)
+    elif data == "admin_pay_secret":
+        await admin_pay_set_secret(update, context)
+    elif data == "admin_pay_aba":
+        await admin_pay_set_aba(update, context)
 
     # --- Admin Export ---
     elif data == "admin_export_csv":
@@ -1902,7 +2052,7 @@ async def _send_pay_options(chat_id: int, context: ContextTypes.DEFAULT_TYPE,
 
 
 async def _handle_custom_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle custom deposit amount for Bakong KHQR."""
+    """Handle custom deposit amount via KHQRPay checkout."""
     if not update.message:
         return
     try:
@@ -1917,28 +2067,61 @@ async def _handle_custom_deposit(update: Update, context: ContextTypes.DEFAULT_T
     context.user_data.pop("deposit_method", None)
     user = update.effective_user
 
-    order_id = f"RAT-{uuid.uuid4().hex[:8].upper()}"
-    result = await create_khqr(amount, order_id)
-    if not result["success"]:
-        await update.message.reply_html(f"❌ QR failed: {result.get('error')}")
-        return
-
+    # Get KHQRPay config
     conn = get_db()
     try:
-        payment_id = create_payment(conn, user.id, amount, result["qr_text"], result["qr_md5"])
+        cfg = get_khqrpay_config(conn)
     finally:
         conn.close()
 
-    msg = await context.bot.send_photo(
-        chat_id=update.effective_chat.id,
-        photo=result["qr_image"],
-        caption=f"💰 <b>Deposit ${amount:.2f}</b>\n\n📱 Scan with Bakong app.\n⏳ Expires in: <b>03:00</b>",
-        parse_mode="HTML",
+    if not cfg["profile_id"] or not cfg["secret_key"]:
+        await update.message.reply_html(
+            "❌ Payment gateway not configured. Contact admin.",
+            reply_markup=_back_button("menu_wallet"),
+        )
+        return
+
+    transaction_id = f"RAT-{uuid.uuid4().hex[:8].upper()}"
+    result = await create_checkout(
+        profile_id=cfg["profile_id"],
+        secret_key=cfg["secret_key"],
+        transaction_id=transaction_id,
+        amount=amount,
+        success_url="https://t.me",
+        remark=f"Custom deposit for user {user.id}",
     )
-    asyncio.create_task(auto_check_payment(
-        payment_id=payment_id, md5_hash=result["qr_md5"], amount=amount,
-        user_id=user.id, chat_id=update.effective_chat.id,
-        message_id=msg.message_id, context=context,
+
+    if not result["success"]:
+        await update.message.reply_html(f"❌ Payment failed: {result.get('error')}")
+        return
+
+    checkout_url = result["checkout_url"]
+    conn = get_db()
+    try:
+        payment_id = create_payment(conn, user.id, amount, checkout_url, transaction_id)
+    finally:
+        conn.close()
+
+    msg = await update.message.reply_html(
+        f"{E('deposit')} <b>Deposit ${amount:.2f}</b>\n\n"
+        f"Tap below to pay via KHQR (Bakong / ABA / Binance):\n"
+        f"{E('timer')} Expires in: <b>03:00</b>\n"
+        f"<i>Order: <code>{transaction_id}</code></i>",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("💳 Pay with KHQR", url=checkout_url)],
+            [_make_smart_button("Back to Wallet", "menu_wallet", "back")],
+        ]),
+    )
+
+    asyncio.create_task(_khqrpay_watcher(
+        payment_id=payment_id,
+        cfg=cfg,
+        transaction_id=transaction_id,
+        amount=amount,
+        user_id=user.id,
+        chat_id=update.effective_chat.id,
+        message_id=msg.message_id,
+        context=context,
     ))
 
 

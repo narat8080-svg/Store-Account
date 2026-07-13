@@ -9,7 +9,7 @@ Usage: python scripts/deploy.py
     bot.py, config.py, requirements.txt, supabase_schema.sql
     admin/__init__.py
     services/database.py, services/payment.py,
-    services/supabase_sync.py
+    services/khqrpay.py, services/supabase_sync.py
     utils/emoji_manager.py
     scripts/supabase_setup.py
 
@@ -49,6 +49,7 @@ CODE_FILES = [
     "admin/__init__.py",
     "services/database.py",
     "services/payment.py",
+    "services/khqrpay.py",
     "services/supabase_sync.py",
     "utils/emoji_manager.py",
     "scripts/supabase_setup.py",
