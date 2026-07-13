@@ -2000,11 +2000,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    # Fix for Python 3.14+ where get_event_loop() may fail
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
+    # Python 3.12+: always create a fresh event loop to avoid
+    # DeprecationWarning on get_event_loop() and RuntimeError on 3.14+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     main()

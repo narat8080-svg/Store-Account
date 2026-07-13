@@ -8,16 +8,16 @@ load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 # ---------------------------------------------------------------------------
 # Telegram
 # ---------------------------------------------------------------------------
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8640787378:AAGYsXT5iEYysTbrfkHEmRn2aMNQYHU5yu0")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "7322712989"))
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
 # ---------------------------------------------------------------------------
 # Bakong KHQR
 # ---------------------------------------------------------------------------
-BAKONG_API_TOKEN = os.getenv("BAKONG_API_TOKEN", "rbk8nBLKCjMVAiPwoJmg1MtMfEOMseLOPaM6eqP2TbHtE4")
-BAKONG_ACCOUNT = os.getenv("BAKONG_ACCOUNT", "chheak_narat@bkrt")
-MERCHANT_NAME = os.getenv("MERCHANT_NAME", "NARAT CHHEAK")
-MERCHANT_PHONE = os.getenv("MERCHANT_PHONE", "0975867586")
+BAKONG_API_TOKEN = os.getenv("BAKONG_API_TOKEN", "")
+BAKONG_ACCOUNT = os.getenv("BAKONG_ACCOUNT", "")
+MERCHANT_NAME = os.getenv("MERCHANT_NAME", "")
+MERCHANT_PHONE = os.getenv("MERCHANT_PHONE", "")
 
 # Bakong API endpoints (fallback if SDK fails)
 BAKONG_CREATE_QR_URL = "https://api-bakong.nbc.gov.kh/v1/khqr/create"
@@ -33,8 +33,8 @@ DEPOSIT_AMOUNTS = [1, 5, 10, 20, 50, 100]  # USD amounts for quick deposit
 # ---------------------------------------------------------------------------
 # Notification Groups
 # ---------------------------------------------------------------------------
-ORDER_GROUP_ID = int(os.getenv("ORDER_GROUP_ID", "-5492405806"))
-PAYMENT_GROUP_ID = int(os.getenv("PAYMENT_GROUP_ID", "-5374461237"))
+ORDER_GROUP_ID = os.getenv("ORDER_GROUP_ID", "")
+PAYMENT_GROUP_ID = os.getenv("PAYMENT_GROUP_ID", "")
 
 # ---------------------------------------------------------------------------
 # Supabase (Cloud Database)

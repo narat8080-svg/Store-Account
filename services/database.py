@@ -5,15 +5,24 @@ All bot/admin code works unchanged.
 """
 import os
 import logging
+import sys
 from config import SUPABASE_URL, SUPABASE_KEY
 
 logger = logging.getLogger(__name__)
 
 _supabase = None
 
+
 def _get_supabase():
     global _supabase
     if _supabase is None:
+        if not SUPABASE_URL or not SUPABASE_KEY:
+            logger.critical(
+                "SUPABASE_URL and SUPABASE_KEY must be set in environment. "
+                "The bot cannot run without a database. "
+                "Add them on Railway under Variables, or in your .env file."
+            )
+            sys.exit(1)
         from supabase import create_client
         _supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
     return _supabase
