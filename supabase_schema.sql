@@ -115,3 +115,12 @@ CREATE INDEX IF NOT EXISTS idx_payments_user_id ON payments(user_id);
 -- ===========================================================================
 -- ALTER PUBLICATION supabase_realtime ADD TABLE orders;
 -- ALTER PUBLICATION supabase_realtime ADD TABLE payments;
+
+-- ===========================================================================
+-- Fix auto-increment sequences (run if you get "duplicate key" errors)
+-- ===========================================================================
+-- SELECT setval('payments_id_seq', COALESCE((SELECT MAX(id) FROM payments), 1));
+-- SELECT setval('orders_id_seq',    COALESCE((SELECT MAX(id) FROM orders), 1));
+-- SELECT setval('products_id_seq',  COALESCE((SELECT MAX(id) FROM products), 1));
+-- SELECT setval('categories_id_seq',COALESCE((SELECT MAX(id) FROM categories), 1));
+-- SELECT setval('stock_id_seq',     COALESCE((SELECT MAX(id) FROM stock), 1));

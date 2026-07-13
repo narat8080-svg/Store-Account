@@ -73,8 +73,23 @@ def get_order_count(conn, user_id):
 # === PAYMENTS ===
 def create_payment(conn, user_id, amount, qr_text='', qr_md5=''):
     s = _get_supabase()
-    r = s.table('payments').insert({'user_id': user_id, 'amount': amount, 'qr_text': qr_text, 'qr_md5': qr_md5, 'status': 'pending'}).execute()
-    return r.data[0]['id'] if r.data else 0
+    try:
+        r = s.table('payments').insert({'user_id': user_id, 'amount': amount, 'qr_text': qr_text, 'qr_md5': qr_md5, 'status': 'pending'}).execute()
+        return r.data[0]['id'] if r.data else 0
+    except Exception as e:
+        err = str(e)
+        if '23505' in err or 'duplicate key' in err.lower():
+            # Auto-fix: reset the sequence and retry once
+            try:
+                s.rpc('fix_payment_sequence').execute()
+            except Exception:
+                pass
+            try:
+                r = s.table('payments').insert({'user_id': user_id, 'amount': amount, 'qr_text': qr_text, 'qr_md5': qr_md5, 'status': 'pending'}).execute()
+                return r.data[0]['id'] if r.data else 0
+            except Exception:
+                pass
+        raise
 
 def mark_payment_paid(conn, payment_id):
     _get_supabase().table('payments').update({'status': 'paid', 'paid_at': 'now()'}).eq('id', payment_id).execute()
