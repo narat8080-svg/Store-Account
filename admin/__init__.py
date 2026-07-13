@@ -2030,11 +2030,14 @@ async def custom_set_value_start(update: Update, context: ContextTypes.DEFAULT_T
     context.user_data["admin_data"] = {"emoji_key": key}
 
     label = LABELS.get(key, key)
+    current = eget(key)
     await query.edit_message_text(
-        f"✏️ <b>Set Emoji for:</b> {label}\n\n"
-        f"Send the new emoji now.\n"
-        f"• For <b>premium</b> emojis: send from Telegram's emoji panel\n"
-        f"• For <b>normal</b> emojis: just send the emoji character",
+        f"✏️ <b>Set Emoji for:</b> {label}\n"
+        f"Current: {current}\n\n"
+        f"Send the new emoji now:\n"
+        f"• <b>Premium emoji:</b> open Telegram's sticker/emoji panel → send an animated emoji\n"
+        f"• <b>Normal emoji:</b> just type the emoji character (e.g. ⭐)\n\n"
+        f"<i>Send ONLY the emoji — no extra text.</i>",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([[
             InlineKeyboardButton("❌ Cancel", callback_data=f"custom_emoji_{key}")
@@ -2560,7 +2563,9 @@ async def admin_settings_welcome(update: Update, context: ContextTypes.DEFAULT_T
     await query.edit_message_text(
         "📝 <b>Edit Welcome Message</b>\n\n"
         "Send the new welcome message.\n"
-        "Supports HTML: <b>bold</b>, <i>italic</i>, <code>code</code>\n\n"
+        "• <b>Bold</b>, <i>Italic</i>, <u>Underline</u>, <s>Strikethrough</s>, <code>Code</code>\n"
+        "• Premium emojis (from Telegram emoji panel)\n"
+        "• Use Ctrl+B, Ctrl+I, Ctrl+Shift+X etc. for formatting\n\n"
         "<i>Send /default to reset to default.</i>",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([[

@@ -469,7 +469,6 @@ async def deposit_create_checkout(update: Update, context: ContextTypes.DEFAULT_
         secret_key=cfg["secret_key"],
         transaction_id=transaction_id,
         amount=amount,
-        success_url="https://t.me",
         remark=f"Deposit for user {user.id}",
     )
 
@@ -1135,7 +1134,6 @@ async def pay_khqr_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         secret_key=cfg["secret_key"],
         transaction_id=transaction_id,
         amount=total_price,
-        success_url="https://t.me",
         remark=f"Order: {prod['name']} x{qty}",
     )
 
@@ -2096,7 +2094,6 @@ async def _handle_custom_deposit(update: Update, context: ContextTypes.DEFAULT_T
         secret_key=cfg["secret_key"],
         transaction_id=transaction_id,
         amount=amount,
-        success_url="https://t.me",
         remark=f"Custom deposit for user {user.id}",
     )
 

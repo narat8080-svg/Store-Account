@@ -35,7 +35,7 @@ async def create_checkout(
     secret_key: str,
     transaction_id: str,
     amount: float,
-    success_url: str = "https://t.me",
+    success_url: str = "https://t.me/storeaccount_bot",
     remark: str = "",
 ) -> dict:
     """
@@ -82,7 +82,7 @@ async def create_aba_checkout(
     secret_key: str,
     transaction_id: str,
     amount: float,
-    success_url: str = "https://t.me",
+    success_url: str = "https://t.me/storeaccount_bot",
     remark: str = "",
 ) -> dict:
     """
@@ -91,6 +91,9 @@ async def create_aba_checkout(
     Uses the /payment/requestv2 endpoint which shows:
     - Live KHQR code verified by Bakong
     - "Open in ABA Mobile" button for one-tap payment
+
+    The URL is built locally — no blocking HTTP validation needed.
+    Payment verification happens later via verify_transaction().
 
     Returns:
         {"success": True, "checkout_url": "https://...", "direct_url": "https://checkout.khqr.cc/..."}
@@ -109,26 +112,10 @@ async def create_aba_checkout(
     }
 
     final_url = _build_checkout_url("payment/requestv2", profile_id, params)
-    # Direct frontend checkout URL (can be used as a clean link)
     direct_url = f"{KHQRPAY_CHECKOUT_BASE}/{profile_id}"
 
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(final_url, timeout=30, allow_redirects=False) as resp:
-                if resp.status in (200, 302, 303, 307, 308):
-                    return {"success": True, "checkout_url": final_url, "direct_url": direct_url}
-                try:
-                    body = await resp.text()
-                    logger.warning(f"KHQRPay create_aba_checkout returned {resp.status}: {body[:200]}")
-                except Exception:
-                    body = ""
-                return {"success": False, "error": f"Gateway error ({resp.status})" if not body else body[:200]}
-    except asyncio.TimeoutError:
-        logger.error("KHQRPay create_aba_checkout timeout")
-        return {"success": True, "checkout_url": final_url, "direct_url": direct_url}
-    except Exception as e:
-        logger.error(f"KHQRPay create_aba_checkout error: {e}")
-        return {"success": False, "error": str(e)}
+    # URL is valid by construction — return immediately, no blocking HTTP call
+    return {"success": True, "checkout_url": final_url, "direct_url": direct_url}
 
 
 async def verify_transaction(
