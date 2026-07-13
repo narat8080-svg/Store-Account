@@ -262,12 +262,13 @@ def update_category(conn, cat_id, name=None, emoji=None):
     if emoji: d['emoji'] = emoji
     if d: _get_supabase().table('categories').update(d).eq('id', cat_id).execute()
 
-def update_product(conn, prod_id, name=None, price=None, emoji=None, category_id=None):
+def update_product(conn, prod_id, name=None, price=None, emoji=None, category_id=None, description=None):
     d = {}
     if name is not None: d['name'] = name
     if price is not None: d['price'] = price
     if emoji is not None: d['emoji'] = emoji
     if category_id is not None: d['category_id'] = category_id
+    if description is not None: d['description'] = description
     if d: _get_supabase().table('products').update(d).eq('id', prod_id).execute()
 
 def set_product_unlimited(conn, product_id, is_unlimited=True):

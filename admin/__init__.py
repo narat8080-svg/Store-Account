@@ -354,7 +354,7 @@ async def admin_products(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             stock_disp = "Unlimited" if is_unl else str(p.get("stock_count", 0))
             lines.append(
                 f"{emoji_for_html(p['emoji'])} <b>{p['name']}</b> — ${p['price']:.2f} "
-                f"({p['category_name']}) | Stock: {stock_disp}"
+                f"| Stock: {stock_disp}"
             )
         text = "📦 <b>Products</b>\n\n" + "\n".join(lines)
     else:
@@ -1130,7 +1130,8 @@ async def admin_edit_prod_choose(update: Update, context: ContextTypes.DEFAULT_T
         [InlineKeyboardButton("📛 Name", callback_data=f"admin_ep_name_{prod_id}")],
         [InlineKeyboardButton("💰 Price", callback_data=f"admin_ep_price_{prod_id}")],
         [InlineKeyboardButton("🎨 Emoji", callback_data=f"admin_ep_emoji_{prod_id}")],
-        [InlineKeyboardButton("📂 Category", callback_data=f"admin_ep_cat_{prod_id}")],
+        [InlineKeyboardButton("� Description", callback_data=f"admin_ep_desc_{prod_id}")],
+        [InlineKeyboardButton("�📂 Category", callback_data=f"admin_ep_cat_{prod_id}")],
         [InlineKeyboardButton("🔙 Back", callback_data="admin_edit_product")],
     ]
 
@@ -1154,6 +1155,7 @@ async def admin_edit_prod_field(update: Update, context: ContextTypes.DEFAULT_TY
         "name": "Send the <b>new name</b>:",
         "price": "Send the <b>new price</b> (number only):",
         "emoji": "Send the <b>new emoji</b>:",
+        "desc": "Send the <b>new description</b> (supports formatting + premium emoji):\n<i>Use Ctrl+B, Ctrl+I, Ctrl+U for formatting</i>",
         "cat": "Send the <b>new category ID</b>:",
     }
     prompt = prompts.get(field, "Send the new value:")
@@ -3421,6 +3423,8 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 update_product(conn, prod_id, price=float(text))
             elif field == "emoji":
                 update_product(conn, prod_id, emoji=_extract_emoji(update.message))
+            elif field == "desc":
+                update_product(conn, prod_id, description=_message_to_html(update.message))
             elif field == "cat":
                 update_product(conn, prod_id, category_id=int(text))
         except (ValueError, TypeError):
@@ -3990,6 +3994,11 @@ def _message_to_html(message) -> str:
             placeholders[pid] = f"<u>{html_escape(segment, quote=False)}</u>"
         elif entity.type == "strikethrough":
             placeholders[pid] = f"<s>{html_escape(segment, quote=False)}</s>"
+        elif entity.type == "spoiler":
+            placeholders[pid] = f'<span class="tg-spoiler">{html_escape(segment, quote=False)}</span>'
+        elif entity.type == "text_link":
+            url = getattr(entity, "url", "")
+            placeholders[pid] = f'<a href="{html_escape(url, quote=True)}">{html_escape(segment, quote=False)}</a>'
         else:
             continue
 
