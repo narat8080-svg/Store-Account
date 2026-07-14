@@ -2160,17 +2160,23 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.ANIMATION, unified_text_handler))
 
     # ── Error handler ──
+    _conflict_logged = False  # debounce so we don't flood logs every 5 seconds
+
     async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        nonlocal _conflict_logged
         err = context.error
         if isinstance(err, Conflict):
-            logger.critical(
-                "⛔ Conflict: Another bot instance is already polling. "
-                "Stop all other instances before starting this one. "
-                "Shutting down to prevent infinite retry loop."
-            )
-            # Stop the app to avoid endless Conflict retries
-            await context.application.stop()
-            await context.application.shutdown()
+            if not _conflict_logged:
+                _conflict_logged = True
+                logger.warning(
+                    "⛔ Conflict: Another bot instance is already polling. "
+                    "Waiting for the other instance to release the token… "
+                    "(This is normal during Railway deploys — the bot will "
+                    "recover automatically once the old instance exits.)"
+                )
+            # Don't stop() – the app may not be fully started yet,
+            # and PTB retries getUpdates automatically.
+            return
         elif isinstance(err, NetworkError):
             logger.error(f"🌐 Network error (will retry): {err}")
         elif isinstance(err, TimedOut):
