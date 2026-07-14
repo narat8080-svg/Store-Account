@@ -1364,90 +1364,70 @@ async def admin_editstock_replace_start(update: Update, context: ContextTypes.DE
 # USER MANAGEMENT
 # ===========================================================================
 async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show user management menu."""
+    """Show user management with stats + recent users."""
     query = update.callback_query
     await query.answer()
 
+    page = 0
+    data = query.data or ""
+    if data.startswith("admin_users_p"):
+        try:
+            page = max(0, int(data.replace("admin_users_p", "")))
+        except ValueError:
+            page = 0
+
+    PAGE_SIZE = 15
     conn = get_db()
     try:
-        total = len(get_all_users(conn, include_banned=True))
-        active = len(get_all_users(conn, include_banned=False))
-        banned = total - active
+        all_users = get_all_users(conn, include_banned=True)
+        active_users = get_all_users(conn, include_banned=False)
     finally:
         conn.close()
 
-    text = (
-        f"👥 <b>User Management</b>\n\n"
-        f"👤 Total: <b>{total}</b> | ✅ Active: <b>{active}</b> | 🚫 Banned: <b>{banned}</b>"
-    )
+    total = len(all_users)
+    active = len(active_users)
+    banned = total - active
+    max_page = max(0, (total - 1) // PAGE_SIZE)
+    page = min(page, max_page)
+    start = page * PAGE_SIZE
+    users_slice = all_users[start:start + PAGE_SIZE]
 
-    keyboard = [
-        [InlineKeyboardButton("📋 List Users", callback_data="admin_list_users")],
-        [InlineKeyboardButton("🔍 Search User", callback_data="admin_search_user")],
-        [InlineKeyboardButton("🔙 Back", callback_data="admin_panel")],
-    ]
+    # Build text list of recent users
+    lines = []
+    for u in users_slice:
+        ban = "🚫" if u.get("is_banned") else "✅"
+        name = (u.get("first_name") or f"ID:{u['user_id']}")[:20]
+        lines.append(f"{ban} <code>{u['user_id']}</code> {name} — ${u.get('balance', 0):.2f}")
+
+    text = (
+        f"👥 <b>User Management</b>\n"
+        f"👤 Total: <b>{total}</b> | ✅ Active: <b>{active}</b> | 🚫 Banned: <b>{banned}</b>\n\n"
+    )
+    if lines:
+        text += "\n".join(lines) + f"\n\n<i>Page {page + 1}/{max_page + 1}</i>"
+    else:
+        text += "<i>No users yet.</i>"
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"admin_users_p{page - 1}"))
+    if page < max_page:
+        nav.append(InlineKeyboardButton("Next ➡️", callback_data=f"admin_users_p{page + 1}"))
+
+    keyboard = []
+    if nav:
+        keyboard.append(nav)
+    keyboard.append([InlineKeyboardButton("🔍 Search by ID", callback_data="admin_search_user")])
+    keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="admin_panel")])
 
     await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 async def admin_list_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Redirect to admin_users."""
     query = update.callback_query
-    await query.answer()
-
-    # Parse page number from callback_data: "admin_list_users" or "admin_list_users_p<n>"
-    page = 0
-    data = query.data or ""
-    if data.startswith("admin_list_users_p"):
-        try:
-            page = max(0, int(data.replace("admin_list_users_p", "")))
-        except ValueError:
-            page = 0
-
-    PAGE_SIZE = 30
-    conn = get_db()
-    try:
-        all_users = get_all_users(conn, include_banned=True)
-    finally:
-        conn.close()
-
-    if not all_users:
-        await query.edit_message_text("👥 No users yet.",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 Back", callback_data="admin_users")
-            ]]))
-        return
-
-    total = len(all_users)
-    max_page = max(0, (total - 1) // PAGE_SIZE)
-    page = min(page, max_page)
-    start = page * PAGE_SIZE
-    users = all_users[start:start + PAGE_SIZE]
-
-    buttons = []
-    for u in users:
-        ban_icon = "🚫" if u.get("is_banned") else "✅"
-        name = u.get("first_name") or f"ID:{u['user_id']}"
-        buttons.append([InlineKeyboardButton(
-            f"{ban_icon} {name} | ${u['balance']:.2f}",
-            callback_data=f"admin_user_detail_{u['user_id']}"
-        )])
-
-    # Pagination row
-    nav_row = []
-    if page > 0:
-        nav_row.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"admin_list_users_p{page - 1}"))
-    if page < max_page:
-        nav_row.append(InlineKeyboardButton("Next ➡️", callback_data=f"admin_list_users_p{page + 1}"))
-    if nav_row:
-        buttons.append(nav_row)
-
-    buttons.append([InlineKeyboardButton("🔙 Back", callback_data="admin_users")])
-
-    await query.edit_message_text(
-        f"👥 <b>Users</b> — total <b>{total}</b> "
-        f"(page {page + 1}/{max_page + 1})\n\nTap a user for details:",
-        parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons)
-    )
+    query.data = "admin_users"
+    await admin_users(update, context)
 
 
 async def admin_search_user_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3527,6 +3507,19 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 InlineKeyboardButton("👤 User Detail", callback_data=f"admin_user_detail_{uid}"),
             ]]),
         )
+        # Notify user
+        try:
+            await context.bot.send_message(
+                chat_id=uid,
+                text=(
+                    f"💰 <b>Balance Updated</b>\n\n"
+                    f"Added: <b>+${amt:.2f}</b>\n"
+                    f"New Balance: <b>${new_bal:.2f}</b>"
+                ),
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
 
     # --- User Deduct ---
     elif state == "user_deduct":
@@ -3552,6 +3545,19 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 InlineKeyboardButton("👤 User Detail", callback_data=f"admin_user_detail_{uid}"),
             ]]),
         )
+        # Notify user
+        try:
+            await context.bot.send_message(
+                chat_id=uid,
+                text=(
+                    f"💰 <b>Balance Updated</b>\n\n"
+                    f"Deducted: <b>-${amt:.2f}</b>\n"
+                    f"New Balance: <b>${new_bal:.2f}</b>"
+                ),
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
 
     # --- User DM ---
     elif state == "user_dm":

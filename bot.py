@@ -212,6 +212,7 @@ def _safe_button(text: str, callback_data: str,
 
 
 def _main_menu_keyboard() -> InlineKeyboardMarkup:
+    from config import SUPPORT_USERNAME
     return InlineKeyboardMarkup([
         [
             _make_smart_button("Profile", "menu_profile", "menu_profile"),
@@ -220,6 +221,9 @@ def _main_menu_keyboard() -> InlineKeyboardMarkup:
         [
             _make_smart_button("Wallet", "menu_wallet", "menu_wallet"),
             _make_smart_button("My Order", "menu_myorder", "menu_myorder"),
+        ],
+        [
+            InlineKeyboardButton("💬 Support", url=f"https://t.me/{SUPPORT_USERNAME.lstrip('@')}"),
         ],
     ])
 
@@ -561,6 +565,23 @@ async def _khqrpay_watcher(
                 )
             except Exception:
                 pass
+
+            # Notify payment group
+            try:
+                from config import PAYMENT_GROUP_ID
+                if PAYMENT_GROUP_ID:
+                    await context.bot.send_message(
+                        chat_id=int(PAYMENT_GROUP_ID),
+                        text=(
+                            f"💵 <b>New Deposit</b>\n\n"
+                            f"👤 <code>{user_id}</code>\n"
+                            f"💰 <b>${amount:.2f}</b>\n"
+                            f"🆔 <code>{transaction_id}</code>"
+                        ),
+                        parse_mode="HTML",
+                    )
+            except Exception:
+                pass
             return
 
         await asyncio.sleep(5)
@@ -573,11 +594,7 @@ async def _khqrpay_watcher(
     finally:
         conn.close()
     try:
-        await context.bot.edit_message_caption(
-            chat_id=chat_id, message_id=message_id,
-            caption=f"{E('expired')} <b>QR Expired</b>\n\nTry again.",
-            parse_mode="HTML",
-        )
+        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
     except Exception:
         pass
 
@@ -1744,7 +1761,7 @@ async def _route_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, da
         await admin_del_promo_confirm(update, context)
 
     # --- Admin Users ---
-    elif data == "admin_users":
+    elif data == "admin_users" or data.startswith("admin_users_p"):
         await admin_users(update, context)
     elif data == "admin_list_users" or data.startswith("admin_list_users_p"):
         await admin_list_users(update, context)
@@ -1888,7 +1905,26 @@ async def unified_text_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         try:
             conn = get_db()
             try:
-                get_or_create_user(conn, user.id, user.username, user.first_name)
+                db_user = get_or_create_user(conn, user.id, user.username, user.first_name)
+                # Notify on first interaction (new user)
+                order_count = get_order_count(conn, user.id)
+                if order_count == 0:
+                    try:
+                        from config import NEW_USER_GROUP_ID
+                        if NEW_USER_GROUP_ID:
+                            username = f"@{user.username}" if user.username else "(no username)"
+                            await context.bot.send_message(
+                                chat_id=int(NEW_USER_GROUP_ID),
+                                text=(
+                                    f"🆕 <b>New User</b>\n\n"
+                                    f"👤 {user.first_name or 'N/A'}\n"
+                                    f"📎 {username}\n"
+                                    f"🆔 <code>{user.id}</code>"
+                                ),
+                                parse_mode="HTML",
+                            )
+                    except Exception:
+                        pass
             finally:
                 conn.close()
         except Exception as e:
