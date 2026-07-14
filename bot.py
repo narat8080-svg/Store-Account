@@ -238,17 +238,15 @@ def _back_button(target: str = "menu_start") -> InlineKeyboardMarkup:
 # /start
 # ===========================================================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show the welcome message with main menu buttons. Checks maintenance mode."""
+    """Show welcome or language selection on first start."""
     user = update.effective_user
 
     # Single DB connection for all checks
     conn = get_db()
     try:
-        # Register user
         if user:
             get_or_create_user(conn, user.id, user.username, user.first_name)
 
-        # Maintenance mode check (non-admin users)
         if user.id != ADMIN_ID:
             from services.database import get_bot_setting
             mode = get_bot_setting(conn, "maintenance_mode", "off")
@@ -258,7 +256,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     await update.message.reply_html(f"🚧 {msg}")
                 return
 
-        # Welcome message — check for custom
         welcome_text = (
             f"{E('welcome')} <b>Welcome to Rat Store!</b>\n\n"
             "Your one-stop shop for premium digital accounts.\n"
@@ -271,11 +268,29 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     finally:
         conn.close()
 
+    # Show language picker on first interaction, then main menu
+    lang = context.user_data.get("language")
+    if not lang:
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🇬🇧 English", callback_data="lang_en")],
+            [InlineKeyboardButton("🇰🇭 ខ្មែរ", callback_data="lang_kh")],
+        ])
+        if update.message:
+            await update.message.reply_text(
+                "🌐 <b>Select Language / ជ្រើសរើសភាសា</b>",
+                parse_mode="HTML", reply_markup=keyboard,
+            )
+        elif update.callback_query:
+            await update.callback_query.edit_message_text(
+                "🌐 <b>Select Language / ជ្រើសរើសភាសា</b>",
+                parse_mode="HTML", reply_markup=keyboard,
+            )
+        return
+
     if update.message:
         try:
             await update.message.reply_html(welcome_text, reply_markup=_main_menu_keyboard())
         except Exception:
-            # If HTML fails, strip tags and send as plain text
             import re
             clean = re.sub(r'<[^>]+>', '', welcome_text)
             await update.message.reply_text(clean, reply_markup=_main_menu_keyboard())
@@ -566,17 +581,19 @@ async def _khqrpay_watcher(
             except Exception:
                 pass
 
-            # Notify payment group
+            # Notify payment group — table format
             try:
                 from config import PAYMENT_GROUP_ID
                 if PAYMENT_GROUP_ID:
                     await context.bot.send_message(
                         chat_id=int(PAYMENT_GROUP_ID),
                         text=(
-                            f"💵 <b>New Deposit</b>\n\n"
-                            f"👤 <code>{user_id}</code>\n"
-                            f"💰 <b>${amount:.2f}</b>\n"
-                            f"🆔 <code>{transaction_id}</code>"
+                            f"💵 <b>Payment Received</b>\n\n"
+                            f"<pre>"
+                            f"| {'ID':<6} | {'User':<14} | {'Amount':<8} | {'Method':<8} | {'Status':<8} |\n"
+                            f"|{'-'*8}|{'-'*16}|{'-'*10}|{'-'*10}|{'-'*10}|\n"
+                            f"| #{payment_id:<5} | ID:{user_id:<12} | ${amount:<7.2f} | {'ABA Pay':<8} | {'Paid ✅':<8} |"
+                            f"</pre>"
                         ),
                         parse_mode="HTML",
                     )
@@ -1640,6 +1657,12 @@ async def _route_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, da
     elif data == "deposit_custom":
         await deposit_custom_start(update, context)
     elif data == "menu_start":
+        await start(update, context)
+
+    # --- Language ---
+    elif data.startswith("lang_"):
+        lang = data.replace("lang_", "")
+        context.user_data["language"] = lang
         await start(update, context)
 
     # --- Product Browsing ---

@@ -93,11 +93,12 @@ DEFAULTS = {
     # Payment methods
     "pay_wallet": "💳",
     "pay_bakong": "🏦",
+    "support": "💬",
 }
 
 # Sections grouping for admin UI
 SECTIONS = {
-    "🏠 Main Menu": ["menu_profile", "menu_product", "menu_wallet", "menu_myorder", "welcome", "back"],
+    "🏠 Main Menu": ["menu_profile", "menu_product", "menu_wallet", "menu_myorder", "welcome", "back", "support"],
     "👤 Profile": ["profile", "id_label", "name_label", "username_label", "balance_label", "order_label"],
     "📦 Product": ["product", "category", "stock_label", "price_label", "buy", "apply_promo", "out_of_stock", "in_stock", "delivery", "description", "qty_minus", "qty_plus", "qty_custom", "unlimited"],
     "💰 Wallet": ["wallet", "deposit", "deposit_custom", "balance_add", "balance_deduct", "timer", "expired"],

@@ -1364,19 +1364,10 @@ async def admin_editstock_replace_start(update: Update, context: ContextTypes.DE
 # USER MANAGEMENT
 # ===========================================================================
 async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show user management with stats + recent users."""
+    """Show user stats + search only (no list)."""
     query = update.callback_query
     await query.answer()
 
-    page = 0
-    data = query.data or ""
-    if data.startswith("admin_users_p"):
-        try:
-            page = max(0, int(data.replace("admin_users_p", "")))
-        except ValueError:
-            page = 0
-
-    PAGE_SIZE = 15
     conn = get_db()
     try:
         all_users = get_all_users(conn, include_banned=True)
@@ -1387,38 +1378,18 @@ async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     total = len(all_users)
     active = len(active_users)
     banned = total - active
-    max_page = max(0, (total - 1) // PAGE_SIZE)
-    page = min(page, max_page)
-    start = page * PAGE_SIZE
-    users_slice = all_users[start:start + PAGE_SIZE]
-
-    # Build text list of recent users
-    lines = []
-    for u in users_slice:
-        ban = "🚫" if u.get("is_banned") else "✅"
-        name = (u.get("first_name") or f"ID:{u['user_id']}")[:20]
-        lines.append(f"{ban} <code>{u['user_id']}</code> {name} — ${u.get('balance', 0):.2f}")
 
     text = (
-        f"👥 <b>User Management</b>\n"
-        f"👤 Total: <b>{total}</b> | ✅ Active: <b>{active}</b> | 🚫 Banned: <b>{banned}</b>\n\n"
+        f"👥 <b>User Management</b>\n\n"
+        f"👤 Total Users: <b>{total}</b>\n"
+        f"✅ Active: <b>{active}</b>\n"
+        f"🚫 Banned: <b>{banned}</b>"
     )
-    if lines:
-        text += "\n".join(lines) + f"\n\n<i>Page {page + 1}/{max_page + 1}</i>"
-    else:
-        text += "<i>No users yet.</i>"
 
-    nav = []
-    if page > 0:
-        nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"admin_users_p{page - 1}"))
-    if page < max_page:
-        nav.append(InlineKeyboardButton("Next ➡️", callback_data=f"admin_users_p{page + 1}"))
-
-    keyboard = []
-    if nav:
-        keyboard.append(nav)
-    keyboard.append([InlineKeyboardButton("🔍 Search by ID", callback_data="admin_search_user")])
-    keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="admin_panel")])
+    keyboard = [
+        [InlineKeyboardButton("🔍 Search by User ID", callback_data="admin_search_user")],
+        [InlineKeyboardButton("🔙 Back", callback_data="admin_panel")],
+    ]
 
     await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -2547,7 +2518,7 @@ async def admin_settings_welcome(update: Update, context: ContextTypes.DEFAULT_T
         "Send the new welcome message.\n"
         "• <b>Bold</b> (Ctrl+B), <i>Italic</i> (Ctrl+I), <u>Underline</u> (Ctrl+U)\n"
         "• <s>Strikethrough</s> (Ctrl+Shift+X), <code>Code</code> (Ctrl+Shift+M)\n"
-        '• <span class="tg-spoiler">Spoiler</span> (Ctrl+Shift+.), <pre>Code Block</pre>\n'
+        '• Quote (Ctrl+Shift+.), <pre>Code Block</pre>\n'
         "• Premium emojis, links, mentions\n\n"
         "<i>Send /default to reset to default.</i>",
         parse_mode="HTML",
