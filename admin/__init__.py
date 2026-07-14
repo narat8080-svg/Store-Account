@@ -2545,9 +2545,10 @@ async def admin_settings_welcome(update: Update, context: ContextTypes.DEFAULT_T
     await query.edit_message_text(
         "📝 <b>Edit Welcome Message</b>\n\n"
         "Send the new welcome message.\n"
-        "• <b>Bold</b>, <i>Italic</i>, <u>Underline</u>, <s>Strikethrough</s>, <code>Code</code>\n"
-        "• Premium emojis (from Telegram emoji panel)\n"
-        "• Use Ctrl+B, Ctrl+I, Ctrl+Shift+X etc. for formatting\n\n"
+        "• <b>Bold</b> (Ctrl+B), <i>Italic</i> (Ctrl+I), <u>Underline</u> (Ctrl+U)\n"
+        "• <s>Strikethrough</s> (Ctrl+Shift+X), <code>Code</code> (Ctrl+Shift+M)\n"
+        '• <span class="tg-spoiler">Spoiler</span> (Ctrl+Shift+.), <pre>Code Block</pre>\n'
+        "• Premium emojis, links, mentions\n\n"
         "<i>Send /default to reset to default.</i>",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([[
@@ -3996,15 +3997,24 @@ def _message_to_html(message) -> str:
             placeholders[pid] = f"<i>{html_escape(segment, quote=False)}</i>"
         elif entity.type == "code":
             placeholders[pid] = f"<code>{html_escape(segment, quote=False)}</code>"
+        elif entity.type == "pre":
+            placeholders[pid] = f"<pre>{html_escape(segment, quote=False)}</pre>"
         elif entity.type == "underline":
             placeholders[pid] = f"<u>{html_escape(segment, quote=False)}</u>"
         elif entity.type == "strikethrough":
             placeholders[pid] = f"<s>{html_escape(segment, quote=False)}</s>"
         elif entity.type == "spoiler":
             placeholders[pid] = f'<span class="tg-spoiler">{html_escape(segment, quote=False)}</span>'
+        elif entity.type == "blockquote":
+            placeholders[pid] = f"<blockquote>{html_escape(segment, quote=False)}</blockquote>"
         elif entity.type == "text_link":
             url = getattr(entity, "url", "")
             placeholders[pid] = f'<a href="{html_escape(url, quote=True)}">{html_escape(segment, quote=False)}</a>'
+        elif entity.type == "text_mention":
+            uid = getattr(entity, "user", {}).get("id", "") if hasattr(entity, "user") else ""
+            placeholders[pid] = f'<a href="tg://user?id={uid}">{html_escape(segment, quote=False)}</a>'
+        elif entity.type == "url":
+            placeholders[pid] = html_escape(segment, quote=False)
         else:
             continue
 
