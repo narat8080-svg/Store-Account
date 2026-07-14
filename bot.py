@@ -4,6 +4,7 @@ import logging
 import uuid
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import Conflict, NetworkError, TimedOut, TelegramError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -2157,6 +2158,29 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.VOICE, unified_text_handler))
     app.add_handler(MessageHandler(filters.Document.ALL, unified_text_handler))
     app.add_handler(MessageHandler(filters.ANIMATION, unified_text_handler))
+
+    # ── Error handler ──
+    async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        err = context.error
+        if isinstance(err, Conflict):
+            logger.critical(
+                "⛔ Conflict: Another bot instance is already polling. "
+                "Stop all other instances before starting this one. "
+                "Shutting down to prevent infinite retry loop."
+            )
+            # Stop the app to avoid endless Conflict retries
+            await context.application.stop()
+            await context.application.shutdown()
+        elif isinstance(err, NetworkError):
+            logger.error(f"🌐 Network error (will retry): {err}")
+        elif isinstance(err, TimedOut):
+            logger.error(f"⏱️ Request timed out (will retry): {err}")
+        elif isinstance(err, TelegramError):
+            logger.error(f"📡 Telegram API error: {err}")
+        else:
+            logger.exception(f"❌ Unhandled error: {err}")
+
+    app.add_error_handler(error_handler)
 
     logger.info("🤖 Bot is starting...")
     app.run_polling(drop_pending_updates=True)
