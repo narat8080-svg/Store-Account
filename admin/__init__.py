@@ -2594,9 +2594,10 @@ async def admin_settings_payment(update: Update, context: ContextTypes.DEFAULT_T
     aba = cfg["aba_url"] or "Not set"
 
     keyboard = [
-        [InlineKeyboardButton("🆔 Set Profile ID", callback_data="admin_pay_profile")],
-        [InlineKeyboardButton("🔑 Set Secret Key", callback_data="admin_pay_secret")],
-        [InlineKeyboardButton("🔗 Set ABA Pay URL", callback_data="admin_pay_aba")],
+        [InlineKeyboardButton("🆔 Edit Profile ID", callback_data="admin_pay_profile")],
+        [InlineKeyboardButton("🔑 Edit Secret Key", callback_data="admin_pay_secret")],
+        [InlineKeyboardButton("🔗 Edit ABA Pay URL", callback_data="admin_pay_aba")],
+        [InlineKeyboardButton("🔄 Reset All", callback_data="admin_pay_reset")],
         [InlineKeyboardButton("🔙 Back", callback_data="admin_settings")],
     ]
 
@@ -2646,6 +2647,28 @@ async def admin_pay_set_aba(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         "Send the ABA Pay link URL:\n"
         "<i>Example: https://link.payway.com.kh/ABAPAY5h478304I</i>",
         parse_mode="HTML", reply_markup=_cancel_button("admin_settings_payment"),
+    )
+
+
+async def admin_pay_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Reset all KHQRPay settings."""
+    query = update.callback_query
+    await query.answer()
+
+    conn = get_db()
+    try:
+        set_bot_setting(conn, "khqrpay_profile_id", "")
+        set_bot_setting(conn, "khqrpay_secret_key", "")
+        set_bot_setting(conn, "khqrpay_aba_url", "")
+    finally:
+        conn.close()
+
+    await query.edit_message_text(
+        "🔄 <b>Payment settings reset!</b>\n\nAll values cleared — will use .env defaults.",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("💳 Back", callback_data="admin_settings_payment"),
+        ]])
     )
 
 

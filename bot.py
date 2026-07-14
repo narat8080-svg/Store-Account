@@ -122,6 +122,7 @@ from admin import (
     admin_pay_set_profile,
     admin_pay_set_secret,
     admin_pay_set_aba,
+    admin_pay_reset,
     admin_export_csv,
     admin_button_styles,
     admin_button_section,
@@ -212,7 +213,6 @@ def _safe_button(text: str, callback_data: str,
 
 
 def _main_menu_keyboard() -> InlineKeyboardMarkup:
-    from config import SUPPORT_USERNAME
     return InlineKeyboardMarkup([
         [
             _make_smart_button("Profile", "menu_profile", "menu_profile"),
@@ -223,7 +223,7 @@ def _main_menu_keyboard() -> InlineKeyboardMarkup:
             _make_smart_button("My Order", "menu_myorder", "menu_myorder"),
         ],
         [
-            InlineKeyboardButton("💬 Support", url=f"https://t.me/{SUPPORT_USERNAME.lstrip('@')}"),
+            _make_smart_button("Support", "menu_support", "support"),
         ],
     ])
 
@@ -238,10 +238,9 @@ def _back_button(target: str = "menu_start") -> InlineKeyboardMarkup:
 # /start
 # ===========================================================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show welcome or language selection on first start."""
+    """Show the welcome message with main menu buttons. Checks maintenance mode."""
     user = update.effective_user
 
-    # Single DB connection for all checks
     conn = get_db()
     try:
         if user:
@@ -267,25 +266,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             welcome_text = custom
     finally:
         conn.close()
-
-    # Show language picker on first interaction, then main menu
-    lang = context.user_data.get("language")
-    if not lang:
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🇬🇧 English", callback_data="lang_en")],
-            [InlineKeyboardButton("🇰🇭 ខ្មែរ", callback_data="lang_kh")],
-        ])
-        if update.message:
-            await update.message.reply_text(
-                "🌐 <b>Select Language / ជ្រើសរើសភាសា</b>",
-                parse_mode="HTML", reply_markup=keyboard,
-            )
-        elif update.callback_query:
-            await update.callback_query.edit_message_text(
-                "🌐 <b>Select Language / ជ្រើសរើសភាសា</b>",
-                parse_mode="HTML", reply_markup=keyboard,
-            )
-        return
 
     if update.message:
         try:
@@ -1658,12 +1638,18 @@ async def _route_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, da
         await deposit_custom_start(update, context)
     elif data == "menu_start":
         await start(update, context)
-
-    # --- Language ---
-    elif data.startswith("lang_"):
-        lang = data.replace("lang_", "")
-        context.user_data["language"] = lang
-        await start(update, context)
+    elif data == "menu_support":
+        from config import SUPPORT_USERNAME
+        await query.answer()
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=f"💬 <b>Support</b>\n\nContact us: {SUPPORT_USERNAME}\nTap to open chat.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("💬 Open Support", url=f"https://t.me/{SUPPORT_USERNAME.lstrip('@')}"),
+                _make_smart_button("Back", "menu_start", "back"),
+            ]]),
+        )
 
     # --- Product Browsing ---
     elif data == "menu_product":
@@ -1890,6 +1876,8 @@ async def _route_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, da
         await admin_pay_set_secret(update, context)
     elif data == "admin_pay_aba":
         await admin_pay_set_aba(update, context)
+    elif data == "admin_pay_reset":
+        await admin_pay_reset(update, context)
 
     # --- Admin Export ---
     elif data == "admin_export_csv":
