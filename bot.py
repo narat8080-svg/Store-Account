@@ -2139,6 +2139,18 @@ async def _handle_custom_deposit(update: Update, context: ContextTypes.DEFAULT_T
     ))
 
 
+async def _clear_webhook() -> None:
+    """Delete any stale webhook so polling doesn't conflict."""
+    import httpx
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook",
+            json={"drop_pending_updates": True},
+        )
+        data = resp.json()
+        logger.info(f"🧹 Webhook cleared: {data.get('description', data)}")
+
+
 # ===========================================================================
 # MAIN
 # ===========================================================================
@@ -2198,14 +2210,16 @@ def main() -> None:
 
     app.add_error_handler(error_handler)
 
+    # ── Startup: delete any stale webhook first (prevents 409/502) ──
     logger.info("🤖 Bot is starting...")
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(_clear_webhook())
 
     # ── Choose polling vs webhook ──
     use_webhook = False
     if WEBHOOK_URL:
         try:
-            # Verify the webhook extra is installed (needs tornado)
-            from telegram.ext._updater import Updater  # noqa: F401 — probe import
+            import tornado  # noqa: F401 — webhook extra check
             use_webhook = True
         except ImportError:
             logger.warning(
@@ -2220,11 +2234,13 @@ def main() -> None:
             app.run_webhook(
                 listen="0.0.0.0",
                 port=WEBHOOK_PORT,
+                url_path=WEBHOOK_PATH,
                 webhook_url=webhook_full_url,
                 drop_pending_updates=True,
             )
         except Exception as e:
             logger.error(f"❌ Webhook failed: {e}. Falling back to polling.")
+            loop.run_until_complete(_clear_webhook())
             logger.info("📡 Polling mode (fallback)")
             app.run_polling(drop_pending_updates=True)
     else:
