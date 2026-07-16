@@ -50,6 +50,17 @@ NEW_USER_GROUP_ID = os.getenv("NEW_USER_GROUP_ID", "-5570553246")
 SUPPORT_USERNAME = os.getenv("SUPPORT_USERNAME", "@Ratofficer")
 
 # ---------------------------------------------------------------------------
+# Webhook mode (Railway/Production — eliminates 409 Conflict)
+# Set WEBHOOK_URL to your Railway app's public URL, e.g.:
+#   https://your-app.railway.app
+# When set, the bot runs as a webhook server instead of polling.
+# Leave empty to use polling (for local dev).
+# ---------------------------------------------------------------------------
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
+WEBHOOK_PORT = int(os.getenv("PORT", "8080"))
+WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "/webhook")
+
+# ---------------------------------------------------------------------------
 # Supabase (Cloud Database)
 # ---------------------------------------------------------------------------
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
