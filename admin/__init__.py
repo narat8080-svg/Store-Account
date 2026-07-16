@@ -3957,12 +3957,12 @@ def _message_to_html(message) -> str:
     """
     Convert a Telegram message (with entities) to safe HTML string.
     Premium custom emoji entities become <tg-emoji> tags.
-    Bold/italic/code entities become HTML tags.
+    Bold/italic/code/underline/strikethrough/spoiler/links become HTML tags.
+    Unhandled entity types (mention, hashtag, etc.) keep original text.
     Raw &, <, > are escaped to prevent BadRequest errors.
 
     Telegram entity offsets/lengths are counted in UTF-16 code units, so we
-    convert the source text to UTF-16 and slice on that boundary. Otherwise
-    emoji-based entities yield empty text and trigger Entity_text_invalid.
+    convert the source text to UTF-16 and slice on that boundary.
     """
     from html import escape as html_escape
 
@@ -3973,11 +3973,9 @@ def _message_to_html(message) -> str:
     if not message.entities:
         return html_escape(text, quote=False)
 
-    # Encode once to UTF-16-LE (2 bytes per code unit) for correct slicing.
     utf16 = text.encode("utf-16-le")
 
     def slice_utf16(offset: int, length: int) -> str:
-        # offset & length are in UTF-16 code units → multiply by 2 for bytes.
         raw = utf16[offset * 2:(offset + length) * 2]
         try:
             return raw.decode("utf-16-le")
@@ -3987,60 +3985,77 @@ def _message_to_html(message) -> str:
     # Sort by offset descending so replacements don't shift earlier indices.
     entities = sorted(message.entities, key=lambda e: e.offset, reverse=True)
 
-    placeholders = {}
+    replacements = []  # list of (start_byte, end_byte, tag_string)
     # Work in UTF-16 space so offsets align, then decode at the end.
     result_utf16 = bytearray(utf16)
 
-    for i, entity in enumerate(entities):
-        pid = f"__ENT_{i}__"
-        start_b, end_b = entity.offset * 2, (entity.offset + entity.length) * 2
+    for entity in entities:
+        start_b = entity.offset * 2
+        end_b = (entity.offset + entity.length) * 2
         segment = slice_utf16(entity.offset, entity.length)
 
-        if entity.type == "custom_emoji":
-            emoji_id = getattr(entity, "custom_emoji_id", "")
-            if not emoji_id:
-                continue
-            fallback = segment or "⭐"
-            placeholders[pid] = (
-                f'<tg-emoji emoji-id="{emoji_id}">'
-                f'{html_escape(fallback, quote=False)}</tg-emoji>'
-            )
-        elif entity.type == "bold":
-            placeholders[pid] = f"<b>{html_escape(segment, quote=False)}</b>"
-        elif entity.type == "italic":
-            placeholders[pid] = f"<i>{html_escape(segment, quote=False)}</i>"
-        elif entity.type == "code":
-            placeholders[pid] = f"<code>{html_escape(segment, quote=False)}</code>"
-        elif entity.type == "pre":
-            placeholders[pid] = f"<pre>{html_escape(segment, quote=False)}</pre>"
-        elif entity.type == "underline":
-            placeholders[pid] = f"<u>{html_escape(segment, quote=False)}</u>"
-        elif entity.type == "strikethrough":
-            placeholders[pid] = f"<s>{html_escape(segment, quote=False)}</s>"
-        elif entity.type == "spoiler":
-            placeholders[pid] = f'<span class="tg-spoiler">{html_escape(segment, quote=False)}</span>'
-        elif entity.type == "blockquote":
-            placeholders[pid] = f"<blockquote>{html_escape(segment, quote=False)}</blockquote>"
-        elif entity.type == "text_link":
-            url = getattr(entity, "url", "")
-            placeholders[pid] = f'<a href="{html_escape(url, quote=True)}">{html_escape(segment, quote=False)}</a>'
-        elif entity.type == "text_mention":
-            uid = getattr(entity, "user", {}).get("id", "") if hasattr(entity, "user") else ""
-            placeholders[pid] = f'<a href="tg://user?id={uid}">{html_escape(segment, quote=False)}</a>'
-        elif entity.type == "url":
-            placeholders[pid] = html_escape(segment, quote=False)
-        else:
-            continue
+        tag = _entity_to_html(entity, segment, html_escape)
+        if tag is None:
+            continue  # keep original text for unhandled types
 
-        # Swap the UTF-16 bytes with the placeholder id (ASCII, safe under UTF-16-LE).
-        result_utf16[start_b:end_b] = pid.encode("utf-16-le")
+        # Remember what to replace and with what
+        replacements.append((start_b, end_b, tag))
+
+    # Apply replacements in original order (reverse of processing order)
+    for start_b, end_b, tag in reversed(replacements):
+        result_utf16[start_b:end_b] = tag.encode("utf-16-le")
 
     result = result_utf16.decode("utf-16-le")
-    result = html_escape(result, quote=False)
-    for pid, tag in placeholders.items():
-        result = result.replace(pid, tag)
-
     return result
+
+
+def _entity_to_html(entity, segment: str, html_escape) -> str | None:
+    """Convert a single MessageEntity to its HTML tag string.
+    Returns None for unhandled types (keep original text)."""
+    if entity.type == "custom_emoji":
+        emoji_id = getattr(entity, "custom_emoji_id", "")
+        if not emoji_id:
+            return None  # keep original plain char
+        fallback = segment or "⭐"
+        return f'<tg-emoji emoji-id="{emoji_id}">{html_escape(fallback, quote=False)}</tg-emoji>'
+
+    elif entity.type == "bold":
+        return f"<b>{html_escape(segment, quote=False)}</b>"
+    elif entity.type == "italic":
+        return f"<i>{html_escape(segment, quote=False)}</i>"
+    elif entity.type == "underline":
+        return f"<u>{html_escape(segment, quote=False)}</u>"
+    elif entity.type == "strikethrough":
+        return f"<s>{html_escape(segment, quote=False)}</s>"
+    elif entity.type == "spoiler":
+        return f'<span class="tg-spoiler">{html_escape(segment, quote=False)}</span>'
+    elif entity.type == "blockquote":
+        return f"<blockquote>{html_escape(segment, quote=False)}</blockquote>"
+    elif entity.type == "code":
+        return f"<code>{html_escape(segment, quote=False)}</code>"
+    elif entity.type == "pre":
+        return f"<pre>{html_escape(segment, quote=False)}</pre>"
+
+    elif entity.type == "text_link":
+        url = getattr(entity, "url", "")
+        return f'<a href="{html_escape(url, quote=True)}">{html_escape(segment, quote=False)}</a>'
+    elif entity.type == "text_mention":
+        uid = getattr(entity, "user", {}).get("id", "") if hasattr(entity, "user") else ""
+        return f'<a href="tg://user?id={uid}">{html_escape(segment, quote=False)}</a>'
+    elif entity.type == "url":
+        return html_escape(segment, quote=False)
+    elif entity.type == "email":
+        return html_escape(segment, quote=False)
+    elif entity.type == "phone_number":
+        return html_escape(segment, quote=False)
+
+    # mention, hashtag, cashtag, bot_command, bank_card, etc.
+    # Keep original text, just HTML-escape it for safety
+    elif entity.type in ("mention", "hashtag", "cashtag", "bot_command"):
+        return html_escape(segment, quote=False)
+
+    # Unknown type — keep original text unchanged
+    return None
 
 
 def _extract_emoji(message) -> str:
