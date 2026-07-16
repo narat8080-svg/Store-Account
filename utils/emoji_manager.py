@@ -324,8 +324,7 @@ def _supabase_load(key: str) -> dict | None:
 
 
 def _load() -> dict:
-    """Load emoji config from Supabase (primary) or local JSON (fallback)."""
-    # Load local file first so we can merge it as a safety net
+    """Load emoji config — merge Supabase + local, local takes priority (most recent)."""
     local_data = {}
     if os.path.exists(CONFIG_PATH):
         try:
@@ -334,24 +333,20 @@ def _load() -> dict:
         except (json.JSONDecodeError, IOError):
             local_data = {}
 
-    # Try Supabase (cloud source of truth)
-    sb_data = _supabase_load("emoji_config")
+    sb_data = _supabase_load("emoji_config") or {}
 
-    if sb_data:
-        # Supabase has data — use it, then sync to local file
-        data = sb_data
+    # Merge: Supabase as base, local overrides (admin changes are local-first)
+    data = {**sb_data, **local_data}
+
+    # Save merged result to both storages so they stay in sync
+    if data:
         try:
             with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-                json.dump(sb_data, f, ensure_ascii=False, indent=2)
+                json.dump(data, f, ensure_ascii=False, indent=2)
         except IOError:
             pass
-    elif local_data:
-        # Supabase empty/unreachable — use local file AND push it back to Supabase
-        # so a fresh server restart won't start from DEFAULTS.
-        data = local_data
-        _supabase_store("emoji_config", local_data)
-    else:
-        data = {}
+        if data != sb_data:
+            _supabase_store("emoji_config", data)
 
     # Merge: use saved values, fall back to defaults, then normalize all
     merged = dict(DEFAULTS)

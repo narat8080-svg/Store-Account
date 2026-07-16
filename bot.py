@@ -14,7 +14,7 @@ from telegram.ext import (
     filters,
 )
 
-from config import BOT_TOKEN, DEPOSIT_AMOUNTS, ADMIN_ID, SUPPORT_USERNAME
+from config import BOT_TOKEN, DEPOSIT_AMOUNTS, ADMIN_ID, SUPPORT_USERNAME, WEBHOOK_URL, WEBHOOK_PORT, WEBHOOK_PATH
 from utils.emoji_manager import (get as E, get_plain as EP, get_premium_id as EID,
                            emoji_for_html, emoji_for_button, emoji_premium_id,
                            parse_db_emoji)
@@ -2203,9 +2203,21 @@ def main() -> None:
 
     app.add_error_handler(error_handler)
 
-    # ── Polling mode ──
-    logger.info("🤖 Bot is starting (polling)...")
-    app.run_polling(drop_pending_updates=True)
+    if WEBHOOK_URL:
+        # ── Webhook mode (Railway Web Service) ──
+        webhook_url = f"{WEBHOOK_URL.rstrip('/')}{WEBHOOK_PATH}"
+        logger.info(f"🔗 Webhook: {webhook_url} (port {WEBHOOK_PORT})")
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=WEBHOOK_PORT,
+            url_path=WEBHOOK_PATH,
+            webhook_url=webhook_url,
+            drop_pending_updates=True,
+        )
+    else:
+        # ── Polling mode ──
+        logger.info("🤖 Bot is starting (polling)...")
+        app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":

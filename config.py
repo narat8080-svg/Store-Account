@@ -50,6 +50,14 @@ NEW_USER_GROUP_ID = os.getenv("NEW_USER_GROUP_ID", "-5570553246")
 SUPPORT_USERNAME = os.getenv("SUPPORT_USERNAME", "@Ratofficer")
 
 # ---------------------------------------------------------------------------
+# Webhook (Railway Web Service — eliminates 409 Conflict)
+# Set this on Railway to your app's public URL. Leave empty for polling.
+# ---------------------------------------------------------------------------
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
+WEBHOOK_PORT = int(os.getenv("PORT", "8080"))
+WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "/webhook")
+
+# ---------------------------------------------------------------------------
 # Supabase (Cloud Database)
 # ---------------------------------------------------------------------------
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
