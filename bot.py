@@ -14,7 +14,7 @@ from telegram.ext import (
     filters,
 )
 
-from config import BOT_TOKEN, DEPOSIT_AMOUNTS, ADMIN_ID, WEBHOOK_URL, WEBHOOK_PORT, WEBHOOK_PATH
+from config import BOT_TOKEN, DEPOSIT_AMOUNTS, ADMIN_ID
 from utils.emoji_manager import (get as E, get_plain as EP, get_premium_id as EID,
                            emoji_for_html, emoji_for_button, emoji_premium_id,
                            parse_db_emoji)
@@ -2139,16 +2139,6 @@ async def _handle_custom_deposit(update: Update, context: ContextTypes.DEFAULT_T
     ))
 
 
-async def _clear_webhook() -> None:
-    """Delete any stale webhook so polling doesn't conflict."""
-    import httpx
-    async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.post(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook",
-            json={"drop_pending_updates": True},
-        )
-        data = resp.json()
-        logger.info(f"🧹 Webhook cleared: {data.get('description', data)}")
 
 
 # ===========================================================================
@@ -2210,43 +2200,9 @@ def main() -> None:
 
     app.add_error_handler(error_handler)
 
-    # ── Startup: delete any stale webhook first (prevents 409/502) ──
-    logger.info("🤖 Bot is starting...")
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(_clear_webhook())
-
-    # ── Choose polling vs webhook ──
-    use_webhook = False
-    if WEBHOOK_URL:
-        try:
-            import tornado  # noqa: F401 — webhook extra check
-            use_webhook = True
-        except ImportError:
-            logger.warning(
-                "⚠️ WEBHOOK_URL is set but python-telegram-bot[webhooks] "
-                "is not installed. Falling back to polling."
-            )
-
-    if use_webhook:
-        webhook_full_url = f"{WEBHOOK_URL.rstrip('/')}{WEBHOOK_PATH}"
-        logger.info(f"🔗 Webhook mode: {webhook_full_url} (port {WEBHOOK_PORT})")
-        try:
-            app.run_webhook(
-                listen="0.0.0.0",
-                port=WEBHOOK_PORT,
-                url_path=WEBHOOK_PATH,
-                webhook_url=webhook_full_url,
-                drop_pending_updates=True,
-            )
-        except Exception as e:
-            logger.error(f"❌ Webhook failed: {e}. Falling back to polling.")
-            loop.run_until_complete(_clear_webhook())
-            logger.info("📡 Polling mode (fallback)")
-            app.run_polling(drop_pending_updates=True)
-    else:
-        # ── Polling mode (default / fallback) ──
-        logger.info("📡 Polling mode")
-        app.run_polling(drop_pending_updates=True)
+    # ── Polling mode ──
+    logger.info("🤖 Bot is starting (polling)...")
+    app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
