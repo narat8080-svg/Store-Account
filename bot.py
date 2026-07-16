@@ -2200,20 +2200,36 @@ def main() -> None:
 
     logger.info("🤖 Bot is starting...")
 
+    # ── Choose polling vs webhook ──
+    use_webhook = False
     if WEBHOOK_URL:
-        # ── Webhook mode (production – no polling conflicts) ──
+        try:
+            # Verify the webhook extra is installed (needs tornado)
+            from telegram.ext._updater import Updater  # noqa: F401 — probe import
+            use_webhook = True
+        except ImportError:
+            logger.warning(
+                "⚠️ WEBHOOK_URL is set but python-telegram-bot[webhooks] "
+                "is not installed. Falling back to polling."
+            )
+
+    if use_webhook:
         webhook_full_url = f"{WEBHOOK_URL.rstrip('/')}{WEBHOOK_PATH}"
         logger.info(f"🔗 Webhook mode: {webhook_full_url} (port {WEBHOOK_PORT})")
-
-        app.run_webhook(
-            listen="0.0.0.0",
-            port=WEBHOOK_PORT,
-            webhook_url=webhook_full_url,
-            drop_pending_updates=True,
-        )
+        try:
+            app.run_webhook(
+                listen="0.0.0.0",
+                port=WEBHOOK_PORT,
+                webhook_url=webhook_full_url,
+                drop_pending_updates=True,
+            )
+        except Exception as e:
+            logger.error(f"❌ Webhook failed: {e}. Falling back to polling.")
+            logger.info("📡 Polling mode (fallback)")
+            app.run_polling(drop_pending_updates=True)
     else:
-        # ── Polling mode (local dev) ──
-        logger.info("📡 Polling mode (set WEBHOOK_URL for production)")
+        # ── Polling mode (default / fallback) ──
+        logger.info("📡 Polling mode")
         app.run_polling(drop_pending_updates=True)
 
 
