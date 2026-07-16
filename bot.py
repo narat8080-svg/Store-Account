@@ -14,7 +14,7 @@ from telegram.ext import (
     filters,
 )
 
-from config import BOT_TOKEN, DEPOSIT_AMOUNTS, ADMIN_ID
+from config import BOT_TOKEN, DEPOSIT_AMOUNTS, ADMIN_ID, SUPPORT_USERNAME
 from utils.emoji_manager import (get as E, get_plain as EP, get_premium_id as EID,
                            emoji_for_html, emoji_for_button, emoji_premium_id,
                            parse_db_emoji)
@@ -224,7 +224,10 @@ def _main_menu_keyboard() -> InlineKeyboardMarkup:
             _make_smart_button("My Order", "menu_myorder", "menu_myorder"),
         ],
         [
-            _make_smart_button("Support", "menu_support", "support"),
+            InlineKeyboardButton(
+                f"{EP('support')} Support".strip(),
+                url=f"https://t.me/{SUPPORT_USERNAME.lstrip('@')}",
+            ),
         ],
     ])
 
