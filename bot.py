@@ -263,6 +263,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         from services.database import get_bot_setting
         custom = get_bot_setting(conn, "welcome_msg", "")
+        welcome_photo = get_bot_setting(conn, "welcome_photo", "")
         if custom:
             welcome_text = custom
     finally:
@@ -270,7 +271,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if update.message:
         try:
-            await update.message.reply_html(welcome_text, reply_markup=_main_menu_keyboard())
+            if welcome_photo:
+                # Send photo + caption with menu buttons
+                await update.message.reply_photo(
+                    photo=welcome_photo,
+                    caption=welcome_text,
+                    parse_mode="HTML",
+                    reply_markup=_main_menu_keyboard(),
+                )
+            else:
+                await update.message.reply_html(welcome_text, reply_markup=_main_menu_keyboard())
         except Exception:
             import re
             clean = re.sub(r'<[^>]+>', '', welcome_text)

@@ -2508,18 +2508,20 @@ async def admin_settings_maintenance(update: Update, context: ContextTypes.DEFAU
 
 
 async def admin_settings_welcome(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Prompt to edit welcome message."""
+    """Prompt to edit welcome message (text or photo)."""
     query = update.callback_query
     await query.answer()
     context.user_data["admin_state"] = "settings_welcome"
 
     await query.edit_message_text(
         "📝 <b>Edit Welcome Message</b>\n\n"
-        "Send the new welcome message.\n"
+        "Send the new welcome message:\n\n"
+        "📝 <b>Text only</b> — with formatting:\n"
         "• <b>Bold</b> (Ctrl+B), <i>Italic</i> (Ctrl+I), <u>Underline</u> (Ctrl+U)\n"
         "• <s>Strikethrough</s> (Ctrl+Shift+X), <code>Code</code> (Ctrl+Shift+M)\n"
-        '• Quote (Ctrl+Shift+.), <pre>Code Block</pre>\n'
-        "• Premium emojis, links, mentions\n\n"
+        '• Quote, <pre>Code Block</pre>, premium emojis\n\n'
+        "🖼 <b>Photo + Caption</b> — send a photo with caption text\n"
+        "  The caption supports the same formatting as above.\n\n"
         "<i>Send /default to reset to default.</i>",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([[
@@ -3782,13 +3784,16 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     # --- Settings Welcome Message ---
     elif state == "settings_welcome":
+        msg = update.message
         context.user_data.pop("admin_state", None)
         context.user_data.pop("admin_data", None)
 
-        if text.strip().lower() == "/default":
+        # Check for /default reset
+        if msg.text and msg.text.strip().lower() == "/default":
             conn = get_db()
             try:
                 set_bot_setting(conn, "welcome_msg", "")
+                set_bot_setting(conn, "welcome_photo", "")
             finally:
                 conn.close()
             await update.message.reply_html(
@@ -3797,20 +3802,35 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                     InlineKeyboardButton("🔙 Back", callback_data="admin_settings")
                 ]])
             )
-        else:
-            # Convert premium emoji entities to <tg-emoji> HTML tags
-            welcome_html = _message_to_html(update.message)
-            conn = get_db()
-            try:
+            return
+
+        conn = get_db()
+        try:
+            if msg.photo:
+                # ── Photo welcome ──
+                photo_id = msg.photo[-1].file_id  # highest resolution
+                caption_html = _message_to_html(msg) if msg.caption else ""
+                set_bot_setting(conn, "welcome_photo", photo_id)
+                set_bot_setting(conn, "welcome_msg", caption_html)
+                await update.message.reply_html(
+                    "✅ Welcome message updated with photo!",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("🔙 Back", callback_data="admin_settings")
+                    ]])
+                )
+            else:
+                # ── Text-only welcome ──
+                welcome_html = _message_to_html(msg)
                 set_bot_setting(conn, "welcome_msg", welcome_html)
-            finally:
-                conn.close()
-            await update.message.reply_html(
-                "✅ Welcome message updated!",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("🔙 Back", callback_data="admin_settings")
-                ]])
-            )
+                set_bot_setting(conn, "welcome_photo", "")  # clear any old photo
+                await update.message.reply_html(
+                    "✅ Welcome message updated!",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("🔙 Back", callback_data="admin_settings")
+                    ]])
+                )
+        finally:
+            conn.close()
 
     # --- Button Style Set ---
     elif state == "btn_style_set":
