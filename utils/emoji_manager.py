@@ -580,8 +580,13 @@ BTN_LABELS = {
 
 BTN_STYLE_LABELS = {
     "primary": "🔵 Blue",
+    "secondary": "⚪ Gray",
     "success": "🟢 Green",
     "danger": "🔴 Red",
+    "warning": "🟡 Yellow",
+    "info": "🔷 Cyan",
+    "light": "⬜ Light",
+    "dark": "⬛ Dark",
     None: "⚪ Default",
 }
 

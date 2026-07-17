@@ -3837,12 +3837,13 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     elif state == "btn_style_set":
         style_key = data.get("style_key")
         new_style = text.strip().lower()
+        valid_styles = ["primary", "secondary", "success", "danger", "warning", "info", "light", "dark"]
 
         if new_style == "none":
             new_style = None
-        elif new_style not in ["primary", "success", "danger"]:
+        elif new_style not in valid_styles:
             await update.message.reply_html(
-                "❌ Invalid style. Use: <code>primary</code> | <code>success</code> | <code>danger</code> | <code>none</code>",
+                "❌ Invalid style. Use: " + " | ".join(f"<code>{s}</code>" for s in valid_styles) + " | <code>none</code>",
                 reply_markup=InlineKeyboardMarkup([[
                     InlineKeyboardButton("❌ Cancel", callback_data=f"btn_detail_{style_key}")
                 ]])
