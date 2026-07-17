@@ -295,12 +295,9 @@ def _make_smart_button(text: str, callback_data: str, key: str = None,
     btn_cfg = _load_btn_cfg()
     cfg = btn_cfg.get(key, {}) if key else {}
 
-    icon_custom_emoji_id = cfg.get("icon_custom_emoji_id")
+    # Premium emoji icon — always from emoji_config (single source of truth)
+    icon_custom_emoji_id = _safe_premium_id(key) if key else None
     style = _get_button_style(key, stock_count) if key else None
-
-    # Fall back to emoji_manager premium ID
-    if not icon_custom_emoji_id and key:
-        icon_custom_emoji_id = _safe_premium_id(key)
 
     if icon_custom_emoji_id:
         button_text = cfg.get("text") or text
