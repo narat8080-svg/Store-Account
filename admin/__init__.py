@@ -100,14 +100,26 @@ def _cat_btn(label: str, callback_data: str, db_emoji) -> InlineKeyboardButton:
 
 def _styled_btn(label: str, callback_data: str, key: str) -> InlineKeyboardButton:
     """
-    Create a styled admin button using button_config.json for colors.
-    Uses plain emoji text (not premium IDs) — simple and reliable.
+    Create a styled admin button using button_config.json for colors
+    and emoji_config.json for premium emoji icons.
+    When a premium icon is set, strips the plain emoji from the label.
     """
     btn_cfg = load_button_config()
     cfg = btn_cfg.get(key, {}) if btn_cfg else {}
     style = cfg.get("style") if isinstance(cfg, dict) else None
 
+    # Check for premium emoji in emoji_config
+    premium_id = get_premium_id(key)
+
+    if premium_id:
+        # Strip the plain emoji from label when using premium icon
+        plain = get_plain(key)
+        if plain and label.startswith(plain):
+            label = label[len(plain):].strip()
+
     kwargs = {"text": label, "callback_data": callback_data}
+    if premium_id:
+        kwargs["icon_custom_emoji_id"] = str(premium_id)
     if style and style != "none":
         kwargs["style"] = style
     try:

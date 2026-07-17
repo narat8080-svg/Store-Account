@@ -94,6 +94,22 @@ DEFAULTS = {
     "pay_wallet": "💳",
     "pay_bakong": "🏦",
     "support": "💬",
+    # Admin panel buttons
+    "admin_dashboard": "📊",
+    "admin_products": "📦",
+    "admin_stock": "📥",
+    "admin_promos": "🎟",
+    "admin_users_btn": "👥",
+    "admin_reports": "📈",
+    "admin_orders": "🛒",
+    "admin_payments": "💵",
+    "admin_broadcast": "📢",
+    "admin_customize": "🎨",
+    "admin_button_styles": "🎨",
+    "admin_settings": "⚙️",
+    "admin_backup": "💾",
+    "admin_export": "📥",
+    "admin_close": "🔙",
 }
 
 # Sections grouping for admin UI
@@ -105,6 +121,12 @@ SECTIONS = {
     "💳 Payment": ["pay_wallet", "pay_bakong"],
     "📋 Orders": ["orders", "order_detail", "file_download"],
     "🛠 Admin": ["admin", "dashboard", "categories", "products", "stock", "promos", "users", "reports"],
+    "🛠 Admin Buttons": [
+        "admin_dashboard", "admin_products", "admin_stock", "admin_promos",
+        "admin_users_btn", "admin_reports", "admin_orders", "admin_payments",
+        "admin_broadcast", "admin_customize", "admin_button_styles",
+        "admin_settings", "admin_backup", "admin_export", "admin_close",
+    ],
     "⚡ Actions": ["add", "edit", "delete", "view", "replace", "refresh", "search", "close", "cancel", "confirm", "dm"],
     "📊 Status": ["success", "error", "warning", "info", "ban", "unban", "active"],
     "🎟 Promo": ["promo_code"],
@@ -179,6 +201,22 @@ LABELS = {
     "pay_wallet": "Pay with Wallet",
     "pay_bakong": "Pay with Bakong",
     "support": "Support Button",
+    # Admin buttons
+    "admin_dashboard": "Dashboard Button",
+    "admin_products": "Products Button",
+    "admin_stock": "Stock Button",
+    "admin_promos": "Promos Button",
+    "admin_users_btn": "Users Button",
+    "admin_reports": "Reports Button",
+    "admin_orders": "Orders Button",
+    "admin_payments": "Payments Button",
+    "admin_broadcast": "Broadcast Button",
+    "admin_customize": "Customize Button",
+    "admin_button_styles": "Button Styles Btn",
+    "admin_settings": "Settings Button",
+    "admin_backup": "Backup Button",
+    "admin_export": "Export CSV Button",
+    "admin_close": "Close Button",
 }
 
 
