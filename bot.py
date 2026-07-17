@@ -246,8 +246,28 @@ def _notify_new_user(context, user) -> None:
 # HELPERS
 # ===========================================================================
 def _load_btn_cfg() -> dict:
-    from utils.emoji_manager import load_button_config
-    return load_button_config()
+    try:
+        from utils.emoji_manager import load_button_config
+        return load_button_config()
+    except Exception as e:
+        logger.error(f"Failed to load button config: {e}")
+        return {}
+
+
+def _safe_emoji(key: str, fallback: str = "") -> str:
+    """Get plain emoji safely — never crash if emoji config is broken."""
+    try:
+        return EP(key)
+    except Exception:
+        return fallback
+
+
+def _safe_premium_id(key: str) -> str | None:
+    """Get premium emoji ID safely — never crash."""
+    try:
+        return EID(key)
+    except Exception:
+        return None
 
 
 def _get_button_style(key: str, stock_count: int = None) -> str | None:
@@ -278,16 +298,15 @@ def _make_smart_button(text: str, callback_data: str, key: str = None,
     icon_custom_emoji_id = cfg.get("icon_custom_emoji_id")
     style = _get_button_style(key, stock_count) if key else None
 
-    # Fall back to the emoji_manager premium ID whenever button_config has no
-    # explicit icon (missing key OR null value). This is what makes an emoji
-    # set via /admin → Customize show up on the home menu, shop, wallet, etc.
+    # Fall back to emoji_manager premium ID
     if not icon_custom_emoji_id and key:
-        icon_custom_emoji_id = EID(key)
+        icon_custom_emoji_id = _safe_premium_id(key)
 
     if icon_custom_emoji_id:
         button_text = cfg.get("text") or text
     else:
-        button_text = f"{EP(key) if key else ''} {text}".strip()
+        plain = _safe_emoji(key)
+        button_text = f"{plain} {text}".strip() if plain else text
 
     return _safe_button(button_text, callback_data, icon_custom_emoji_id, style)
 
@@ -319,7 +338,7 @@ def _main_menu_keyboard() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(
-                f"{EP('support')} Support".strip(),
+                f"{_safe_emoji('support')} Support".strip(),
                 url=f"https://t.me/{SUPPORT_USERNAME.lstrip('@')}",
             ),
         ],

@@ -327,16 +327,21 @@ def _supabase_load(key: str) -> dict | None:
 
 
 def _load() -> dict:
-    """Load emoji config — merge Supabase + local, local takes priority (most recent)."""
+    """Load emoji config — merge Supabase + local, local takes priority (most recent).
+    Never throws — always returns at least DEFAULTS."""
     local_data = {}
-    if os.path.exists(CONFIG_PATH):
-        try:
+    try:
+        if os.path.exists(CONFIG_PATH):
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
                 local_data = json.load(f)
-        except (json.JSONDecodeError, IOError):
-            local_data = {}
+    except Exception:
+        local_data = {}
 
-    sb_data = _supabase_load("emoji_config") or {}
+    sb_data = {}
+    try:
+        sb_data = _supabase_load("emoji_config") or {}
+    except Exception:
+        pass
 
     # Merge: Supabase as base, local overrides (admin changes are local-first)
     data = {**sb_data, **local_data}
@@ -346,26 +351,30 @@ def _load() -> dict:
         try:
             with open(CONFIG_PATH, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
-        except IOError:
+        except Exception:
             pass
         if data != sb_data:
-            _supabase_store("emoji_config", data)
+            try:
+                _supabase_store("emoji_config", data)
+            except Exception:
+                pass
 
     # Merge: use saved values, fall back to defaults, then normalize all
     merged = dict(DEFAULTS)
     merged.update(data)
 
     # Normalize any legacy <tg-emoji> strings to the new object format
-    changed = False
-    for k, v in merged.items():
-        normalized = _normalize_value(v)
-        if normalized != v:
-            merged[k] = normalized
-            changed = True
-
-    # Auto-save if we migrated legacy entries
-    if changed:
-        _save(merged)
+    try:
+        changed = False
+        for k, v in merged.items():
+            normalized = _normalize_value(v)
+            if normalized != v:
+                merged[k] = normalized
+                changed = True
+        if changed:
+            _save(merged)
+    except Exception:
+        pass
 
     return merged
 
@@ -475,37 +484,42 @@ def reload_button_cache() -> None:
 
 
 def load_button_config() -> dict:
-    """Load button configs (style and custom emoji ID) — merge local over Supabase."""
+    """Load button configs — merge local over Supabase. Never throws."""
     global _button_cache
     if _button_cache is not None:
         return _button_cache
 
-    local_data = None
-    if os.path.exists(BUTTON_CONFIG_PATH):
-        try:
+    local_data = {}
+    try:
+        if os.path.exists(BUTTON_CONFIG_PATH):
             with open(BUTTON_CONFIG_PATH, "r", encoding="utf-8") as f:
                 local_data = json.load(f)
-        except (json.JSONDecodeError, IOError):
-            local_data = None
+    except Exception:
+        local_data = {}
 
-    sb_data = _supabase_load("button_config") or {}
+    sb_data = {}
+    try:
+        sb_data = _supabase_load("button_config") or {}
+    except Exception:
+        pass
 
-    # Merge: Supabase base, local overrides (admin changes are local-first)
-    merged = {**sb_data, **(local_data or {})}
+    merged = {**sb_data, **local_data}
 
     if merged:
         _button_cache = merged
-        # Save merged result to both storages
         try:
             with open(BUTTON_CONFIG_PATH, "w", encoding="utf-8") as f:
                 json.dump(merged, f, ensure_ascii=False, indent=2)
-        except IOError:
+        except Exception:
             pass
         if merged != sb_data:
-            _supabase_store("button_config", merged)
+            try:
+                _supabase_store("button_config", merged)
+            except Exception:
+                pass
         return _button_cache
 
-    # No data anywhere — return defaults
+    # Fallback defaults
     _button_cache = {
         "menu_profile": {"text": "Profile", "icon_custom_emoji_id": None, "style": None},
         "menu_product": {"text": "Product", "icon_custom_emoji_id": None, "style": None},
