@@ -2748,10 +2748,10 @@ async def admin_button_styles(update: Update, context: ContextTypes.DEFAULT_TYPE
     buttons.append([InlineKeyboardButton("🔙 Back", callback_data="admin_panel")])
 
     await query.edit_message_text(
-        "🎨 <b>Button Color Indicators</b>\n\n"
-        "Select a section to set a colored emoji prefix on buttons.\n"
-        "🔵 Blue | 🟢 Green | 🔴 Red\n\n"
-        "<i>Note: Telegram has no native button colors. A colored circle emoji is added to the button text instead.</i>",
+        "🎨 <b>Button Styles</b>\n\n"
+        "Select a section to customize button <b>premium emoji icons</b>.\n"
+        "⚠️ <b>Note:</b> Telegram API does not support button colors.\n"
+        "You CAN set premium custom emojis for button icons here.",
         parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons)
     )
 
