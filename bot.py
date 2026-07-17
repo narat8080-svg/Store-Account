@@ -271,31 +271,21 @@ def _safe_premium_id(key: str) -> str | None:
 
 
 def _get_button_style(key: str, stock_count: int = None) -> str | None:
-    """
-    Get button style from button_config.json with hardcoded stock fallbacks.
-    Stock-aware for buy buttons: in-stock=blue, out-of-stock=red, low-stock=blue.
-    """
+    """Get button style from config. Returns 'primary', 'success', 'danger', or None."""
     from utils.emoji_manager import get_button_style
-
-    # Stock-aware: check stock status keys for buy buttons
-    if key in ("buy", "buy_now") and stock_count is not None:
-        if stock_count == 0:
-            return get_button_style("out_of_stock") or "danger"
-        elif stock_count <= 3:
-            return get_button_style("low_stock") or "primary"
-        return get_button_style("in_stock") or "primary"
-
-    # Direct lookup from button_config.json
     return get_button_style(key)
+
+
+# Color indicators for button text (Telegram API has no native button colors)
+_STYLE_INDICATOR = {"primary": "🔵", "success": "🟢", "danger": "🔴"}
 
 
 def _make_smart_button(text: str, callback_data: str, key: str = None,
                        stock_count: int = None) -> InlineKeyboardButton:
-    """Create a button with style and emoji from config. PTB-version safe."""
+    """Create a button with premium emoji icon + color indicator prefix."""
     btn_cfg = _load_btn_cfg()
     cfg = btn_cfg.get(key, {}) if key else {}
 
-    # Premium emoji icon — always from emoji_config (single source of truth)
     icon_custom_emoji_id = _safe_premium_id(key) if key else None
     style = _get_button_style(key, stock_count) if key else None
 
@@ -304,6 +294,10 @@ def _make_smart_button(text: str, callback_data: str, key: str = None,
     else:
         plain = _safe_emoji(key)
         button_text = f"{plain} {text}".strip() if plain else text
+
+    # Add color indicator as text prefix (Telegram has no colored button API)
+    if style and style in _STYLE_INDICATOR:
+        button_text = f"{_STYLE_INDICATOR[style]} {button_text}"
 
     return _safe_button(button_text, callback_data, icon_custom_emoji_id, style)
 
