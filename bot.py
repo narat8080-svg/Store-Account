@@ -316,10 +316,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         if user:
             db_user = get_or_create_user(conn, user.id, user.username, user.first_name)
-            # Notify group on first interaction (order_count == 0 means new)
-            order_count = get_order_count(conn, user.id)
-            if order_count == 0:
-                _notify_new_user(context, user)
+            # Notify group on first interaction (once per user session)
+            if context.user_data.get("new_user_notified") is None:
+                order_count = get_order_count(conn, user.id)
+                if order_count == 0:
+                    _notify_new_user(context, user)
+                context.user_data["new_user_notified"] = True
 
         if user.id != ADMIN_ID:
             from services.database import get_bot_setting
@@ -1336,7 +1338,7 @@ async def _khqrpay_order_watcher(
                     parse_mode="HTML",
                 )
 
-            # Notify order group
+            # Notify both groups
             try:
                 from config import ORDER_GROUP_ID
                 if ORDER_GROUP_ID:
@@ -1351,6 +1353,7 @@ async def _khqrpay_order_watcher(
                     await context.bot.send_message(chat_id=int(ORDER_GROUP_ID), text=text, parse_mode="HTML")
             except Exception:
                 pass
+            _notify_payment_group(context, user_id, amount, payment_id, "ABA Pay")
             return
 
         await asyncio.sleep(5)

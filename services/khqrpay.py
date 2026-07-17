@@ -7,6 +7,7 @@ Direct QR API (server-to-server) + Verify V2 with Bakong fallback.
 """
 import asyncio
 import hashlib
+import json
 import logging
 from urllib.parse import urlencode
 
@@ -62,7 +63,7 @@ async def create_aba_qr(
                 logger.info(f"KHQRPay QR API ← {resp.status} | body={raw[:300]}")
 
                 try:
-                    data = __import__('json').loads(raw)
+                    data = json.loads(raw)
                 except Exception:
                     return {"success": False, "error": f"Invalid JSON response (HTTP {resp.status})"}
 
@@ -114,7 +115,7 @@ async def verify_aba_payment(
             async with session.post(url, data=payload, timeout=30) as resp:
                 raw = await resp.text()
                 try:
-                    data = __import__('json').loads(raw)
+                    data = json.loads(raw)
                 except Exception:
                     return {"success": True, "paid": False}
 
@@ -127,6 +128,11 @@ async def verify_aba_payment(
                         "amount": tx_data.get("amount", ""),
                     }
 
+                # Non-zero response code — log error for debugging
+                logger.warning(
+                    f"KHQRPay verify failed: code={data.get('responseCode')} "
+                    f"msg={data.get('responseMessage', '?')} txn={transaction_id}"
+                )
                 return {"success": True, "paid": False}
 
     except Exception as e:

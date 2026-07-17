@@ -174,13 +174,13 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         [InlineKeyboardButton("👥 Users", callback_data="admin_users"),
          InlineKeyboardButton("📈 Reports", callback_data="admin_reports")],
         [InlineKeyboardButton("🛒 Orders", callback_data="admin_orders_mgmt"),
-         InlineKeyboardButton("� Payments", callback_data="admin_payments")],
-        [InlineKeyboardButton("�📢 Broadcast", callback_data="admin_broadcast")],
+         InlineKeyboardButton("💵 Payments", callback_data="admin_payments")],
+        [InlineKeyboardButton("📢 Broadcast", callback_data="admin_broadcast")],
         [InlineKeyboardButton("🎨 Customize", callback_data="admin_customize"),
          InlineKeyboardButton("🎨 Button Styles", callback_data="admin_button_styles")],
         [InlineKeyboardButton("⚙️ Settings", callback_data="admin_settings"),
-         InlineKeyboardButton("� Backup", callback_data="admin_backup")],
-        [InlineKeyboardButton("�📥 Export CSV", callback_data="admin_export_csv")],
+         InlineKeyboardButton("💾 Backup", callback_data="admin_backup")],
+        [InlineKeyboardButton("📥 Export CSV", callback_data="admin_export_csv")],
         [InlineKeyboardButton("🔙 Close", callback_data="menu_start")],
     ]
 
@@ -1130,8 +1130,8 @@ async def admin_edit_prod_choose(update: Update, context: ContextTypes.DEFAULT_T
         [InlineKeyboardButton("📛 Name", callback_data=f"admin_ep_name_{prod_id}")],
         [InlineKeyboardButton("💰 Price", callback_data=f"admin_ep_price_{prod_id}")],
         [InlineKeyboardButton("🎨 Emoji", callback_data=f"admin_ep_emoji_{prod_id}")],
-        [InlineKeyboardButton("� Description", callback_data=f"admin_ep_desc_{prod_id}")],
-        [InlineKeyboardButton("�📂 Category", callback_data=f"admin_ep_cat_{prod_id}")],
+        [InlineKeyboardButton("📝 Description", callback_data=f"admin_ep_desc_{prod_id}")],
+        [InlineKeyboardButton("📂 Category", callback_data=f"admin_ep_cat_{prod_id}")],
         [InlineKeyboardButton("🔙 Back", callback_data="admin_edit_product")],
     ]
 
@@ -2465,8 +2465,8 @@ async def admin_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             callback_data="admin_settings_maintenance"
         )],
         [InlineKeyboardButton("📝 Edit Welcome Message", callback_data="admin_settings_welcome")],
-        [InlineKeyboardButton("� Payment Gateway", callback_data="admin_settings_payment")],
-        [InlineKeyboardButton("�🔔 Admin Notifications", callback_data="admin_settings_notify")],
+        [InlineKeyboardButton("💳 Payment Gateway", callback_data="admin_settings_payment")],
+        [InlineKeyboardButton("🔔 Admin Notifications", callback_data="admin_settings_notify")],
         [InlineKeyboardButton(
             f"📢 Restock Alerts: {'ON 🔔' if restock == 'on' else 'OFF 🔕'}",
             callback_data="admin_settings_restock"
