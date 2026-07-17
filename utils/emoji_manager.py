@@ -178,6 +178,7 @@ LABELS = {
     "description": "Description",
     "pay_wallet": "Pay with Wallet",
     "pay_bakong": "Pay with Bakong",
+    "support": "Support Button",
 }
 
 
@@ -547,7 +548,7 @@ def save_button_config(config: dict) -> None:
 # Button Style Manager — Sections, Labels, Helpers
 # ---------------------------------------------------------------------------
 BTN_SECTIONS = {
-    "🏠 Main Menu": ["menu_profile", "menu_product", "menu_wallet", "menu_myorder"],
+    "🏠 Main Menu": ["menu_profile", "menu_product", "menu_wallet", "menu_myorder", "support"],
     "🛒 Shop Actions": ["buy", "apply_promo", "deposit", "deposit_custom", "qty_minus", "qty_plus", "qty_custom"],
     "💳 Payment": ["pay_wallet", "pay_bakong"],
     "↩️ Navigation": ["back", "cancel", "confirm"],
@@ -560,6 +561,7 @@ BTN_LABELS = {
     "menu_product": "Shop Now Button",
     "menu_wallet": "Wallet Button",
     "menu_myorder": "My Order Button",
+    "support": "Support Button",
     "buy": "Buy Button",
     "apply_promo": "Apply Promo Button",
     "deposit": "Deposit Button",

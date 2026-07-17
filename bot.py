@@ -322,6 +322,32 @@ def _safe_button(text: str, callback_data: str,
         return InlineKeyboardButton(text=text, callback_data=callback_data)
 
 
+def _make_url_button(text: str, url: str, key: str = None) -> InlineKeyboardButton:
+    """
+    Create a URL button with premium emoji from config.
+    Style is not supported on URL buttons by Telegram API.
+    """
+    btn_cfg = _load_btn_cfg()
+    cfg = btn_cfg.get(key, {}) if key else {}
+
+    # Premium emoji icon from emoji_config
+    icon_custom_emoji_id = _safe_premium_id(key) if key else None
+
+    if icon_custom_emoji_id:
+        button_text = cfg.get("text") or text
+    else:
+        plain = _safe_emoji(key)
+        button_text = f"{plain} {text}".strip() if plain else text
+
+    kwargs = {"text": button_text, "url": url}
+    if icon_custom_emoji_id:
+        kwargs["icon_custom_emoji_id"] = str(icon_custom_emoji_id)
+    try:
+        return InlineKeyboardButton(**kwargs)
+    except TypeError:
+        return InlineKeyboardButton(text=text, url=url)
+
+
 def _main_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
@@ -333,9 +359,10 @@ def _main_menu_keyboard() -> InlineKeyboardMarkup:
             _make_smart_button("My Order", "menu_myorder", "menu_myorder"),
         ],
         [
-            InlineKeyboardButton(
-                f"💜 Support",
-                url=f"https://t.me/{SUPPORT_USERNAME.lstrip('@')}",
+            _make_url_button(
+                "Support",
+                f"https://t.me/{SUPPORT_USERNAME.lstrip('@')}",
+                "support",
             ),
         ],
     ])
@@ -1750,10 +1777,14 @@ async def _route_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, da
         await query.answer()
         await context.bot.send_message(
             chat_id=query.message.chat_id,
-            text=f"💬 <b>Support</b>\n\nContact us: {SUPPORT_USERNAME}\nTap to open chat.",
+            text=f"{E('support')} <b>Support</b>\n\nContact us: {SUPPORT_USERNAME}\nTap to open chat.",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("💬 Open Support", url=f"https://t.me/{SUPPORT_USERNAME.lstrip('@')}"),
+                _make_url_button(
+                    "Open Support",
+                    f"https://t.me/{SUPPORT_USERNAME.lstrip('@')}",
+                    "support",
+                ),
                 _make_smart_button("Back", "menu_start", "back"),
             ]]),
         )

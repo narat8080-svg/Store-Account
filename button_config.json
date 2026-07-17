@@ -99,6 +99,11 @@
     "icon_custom_emoji_id": null,
     "style": "primary"
   },
+  "support": {
+    "text": "Support",
+    "icon_custom_emoji_id": null,
+    "style": null
+  },
   "_test": {
     "text": "Test",
     "style": "primary"
