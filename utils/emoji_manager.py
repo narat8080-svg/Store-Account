@@ -472,12 +472,11 @@ def reload_button_cache() -> None:
 
 
 def load_button_config() -> dict:
-    """Load button configs (style and custom emoji ID) from JSON."""
+    """Load button configs (style and custom emoji ID) — merge local over Supabase."""
     global _button_cache
     if _button_cache is not None:
         return _button_cache
 
-    # Load local file first as a safety net
     local_data = None
     if os.path.exists(BUTTON_CONFIG_PATH):
         try:
@@ -486,25 +485,24 @@ def load_button_config() -> dict:
         except (json.JSONDecodeError, IOError):
             local_data = None
 
-    # Try Supabase (cloud source of truth)
-    sb_data = _supabase_load("button_config")
+    sb_data = _supabase_load("button_config") or {}
 
-    if sb_data:
-        _button_cache = sb_data
+    # Merge: Supabase base, local overrides (admin changes are local-first)
+    merged = {**sb_data, **(local_data or {})}
+
+    if merged:
+        _button_cache = merged
+        # Save merged result to both storages
         try:
             with open(BUTTON_CONFIG_PATH, "w", encoding="utf-8") as f:
-                json.dump(sb_data, f, ensure_ascii=False, indent=2)
+                json.dump(merged, f, ensure_ascii=False, indent=2)
         except IOError:
             pass
+        if merged != sb_data:
+            _supabase_store("button_config", merged)
         return _button_cache
 
-    if local_data:
-        # Supabase empty/unreachable — use local file AND push it back
-        _button_cache = local_data
-        _supabase_store("button_config", local_data)
-        return _button_cache
-
-    # Default configs for the main menu buttons
+    # No data anywhere — return defaults
     _button_cache = {
         "menu_profile": {"text": "Profile", "icon_custom_emoji_id": None, "style": None},
         "menu_product": {"text": "Product", "icon_custom_emoji_id": None, "style": None},

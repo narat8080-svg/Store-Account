@@ -44,7 +44,7 @@ DEPOSIT_AMOUNTS = [1, 5, 10, 20, 50, 100]  # USD amounts for quick deposit
 # ---------------------------------------------------------------------------
 ORDER_GROUP_ID = os.getenv("ORDER_GROUP_ID", "-1003729530722")
 PAYMENT_GROUP_ID = os.getenv("PAYMENT_GROUP_ID", "-1004352483292")
-NEW_USER_GROUP_ID = os.getenv("NEW_USER_GROUP_ID", "-5570553246")
+NEW_USER_GROUP_ID = os.getenv("NEW_USER_GROUP_ID", "-1004490564374")
 
 # Support contact
 SUPPORT_USERNAME = os.getenv("SUPPORT_USERNAME", "@Ratofficer")

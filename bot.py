@@ -150,6 +150,73 @@ logger = logging.getLogger(__name__)
 
 
 # ===========================================================================
+# NOTIFICATION HELPERS
+# ===========================================================================
+def _notify_payment_group(context, user_id: int, amount: float, payment_id: int, method: str = "KHQR") -> None:
+    """Send payment notification to the payment group."""
+    try:
+        from config import PAYMENT_GROUP_ID
+        if not PAYMENT_GROUP_ID:
+            return
+        gid = int(PAYMENT_GROUP_ID)
+        context.bot.send_message(
+            chat_id=gid,
+            text=(
+                f"💵 <b>Payment Received</b>\n\n"
+                f"👤 User: <code>{user_id}</code>\n"
+                f"💰 Amount: <b>${amount:.2f}</b>\n"
+                f"🏷 Payment #: <code>{payment_id}</code>\n"
+                f"💳 Method: {method}"
+            ),
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.warning(f"Payment group notify failed: {e}")
+
+
+def _notify_order_group(context, user, prod: dict, qty: int, total: float, new_balance: float, promo_data=None) -> None:
+    """Send order notification to the order group."""
+    try:
+        from config import ORDER_GROUP_ID
+        if not ORDER_GROUP_ID:
+            return
+        username = f"@{user.username}" if user.username else f"ID:{user.id}"
+        text = (
+            f"🛒 <b>New Order</b>\n\n"
+            f"📦 {emoji_for_html(prod['emoji'])} <b>{prod['name']}</b> × {qty}\n"
+            f"👤 {username}\n"
+            f"💰 Amount: <b>${total:.2f}</b>\n"
+            f"💳 Balance after: <b>${new_balance:.2f}</b>"
+        )
+        if promo_data:
+            text += f"\n🎟 Promo: <code>{promo_data['code']}</code>"
+        context.bot.send_message(chat_id=int(ORDER_GROUP_ID), text=text, parse_mode="HTML")
+    except Exception as e:
+        logger.warning(f"Order group notify failed: {e}")
+
+
+def _notify_new_user(context, user) -> None:
+    """Send new user notification to the new-user group."""
+    try:
+        from config import NEW_USER_GROUP_ID
+        if not NEW_USER_GROUP_ID:
+            return
+        username = f"@{user.username}" if user.username else "(no username)"
+        context.bot.send_message(
+            chat_id=int(NEW_USER_GROUP_ID),
+            text=(
+                f"🆕 <b>New User</b>\n\n"
+                f"👤 {user.first_name or 'N/A'}\n"
+                f"📎 {username}\n"
+                f"🆔 <code>{user.id}</code>"
+            ),
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.warning(f"New user notify failed: {e}")
+
+
+# ===========================================================================
 # HELPERS
 # ===========================================================================
 def _load_btn_cfg() -> dict:
@@ -248,7 +315,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     conn = get_db()
     try:
         if user:
-            get_or_create_user(conn, user.id, user.username, user.first_name)
+            db_user = get_or_create_user(conn, user.id, user.username, user.first_name)
+            # Notify group on first interaction (order_count == 0 means new)
+            order_count = get_order_count(conn, user.id)
+            if order_count == 0:
+                _notify_new_user(context, user)
 
         if user.id != ADMIN_ID:
             from services.database import get_bot_setting
@@ -562,10 +633,15 @@ async def _khqrpay_watcher(
             finally:
                 conn.close()
 
+            # Delete QR photo, send clean success message
             try:
-                await context.bot.edit_message_caption(
-                    chat_id=chat_id, message_id=message_id,
-                    caption=(
+                await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+            except Exception:
+                pass
+            try:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=(
                         f"{E('success')} <b>Payment Confirmed!</b>\n\n"
                         f"💰 Amount: <b>${amount:.2f}</b>\n"
                         f"💳 New Balance: <b>${new_balance:.2f}</b>"
@@ -575,24 +651,8 @@ async def _khqrpay_watcher(
             except Exception:
                 pass
 
-            # Notify payment group — table format
-            try:
-                from config import PAYMENT_GROUP_ID
-                if PAYMENT_GROUP_ID:
-                    await context.bot.send_message(
-                        chat_id=int(PAYMENT_GROUP_ID),
-                        text=(
-                            f"💵 <b>Payment Received</b>\n\n"
-                            f"<pre>"
-                            f"| {'ID':<6} | {'User':<14} | {'Amount':<8} | {'Method':<8} | {'Status':<8} |\n"
-                            f"|{'-'*8}|{'-'*16}|{'-'*10}|{'-'*10}|{'-'*10}|\n"
-                            f"| #{payment_id:<5} | ID:{user_id:<12} | ${amount:<7.2f} | {'ABA Pay':<8} | {'Paid ✅':<8} |"
-                            f"</pre>"
-                        ),
-                        parse_mode="HTML",
-                    )
-            except Exception:
-                pass
+            # Notify payment group
+            _notify_payment_group(context, user_id, amount, payment_id, "ABA Pay")
             return
 
         await asyncio.sleep(5)
@@ -996,23 +1056,7 @@ async def buy_execute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     )
 
     # ── Notify order group ──
-    try:
-        from config import ORDER_GROUP_ID
-        username = f"@{user.username}" if user.username else f"ID:{user.id}"
-        await context.bot.send_message(
-            chat_id=ORDER_GROUP_ID,
-            text=(
-                f"🛒 <b>New Order</b>\n\n"
-                f"📦 {emoji_for_html(prod['emoji'])} <b>{prod['name']}</b> × {qty}\n"
-                f"👤 User: {username}\n"
-                f"💰 Amount: <b>${total_price:.2f}</b>\n"
-                f"💳 Balance after: <b>${new_balance:.2f}</b>"
-                + (f"\n🎟 Promo: <code>{promo_data['code']}</code>" if promo_data else "")
-            ),
-            parse_mode="HTML",
-        )
-    except Exception:
-        pass  # Group not accessible, silently ignore
+    _notify_order_group(context, user, prod, qty, total_price, new_balance, promo_data)
 
 
 def _get_supabase_for_promo(promo_id: int):
@@ -1245,10 +1289,16 @@ async def _khqrpay_order_watcher(
             finally:
                 conn.close()
 
+            # Delete QR, show success, deliver
             try:
-                await context.bot.edit_message_caption(
-                    chat_id=chat_id, message_id=message_id,
-                    caption=(
+                await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+            except Exception:
+                pass
+
+            try:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=(
                         f"{E('success')} <b>Payment Received!</b>\n\n"
                         f"{emoji_for_html(prod['emoji'])} <b>{prod['name']}</b> × {qty}\n"
                         f"{E('price_label')} Paid: <b>${amount:.2f}</b>"
@@ -1286,21 +1336,19 @@ async def _khqrpay_order_watcher(
                     parse_mode="HTML",
                 )
 
-            # Order group notification
+            # Notify order group
             try:
                 from config import ORDER_GROUP_ID
                 if ORDER_GROUP_ID:
-                    await context.bot.send_message(
-                        chat_id=int(ORDER_GROUP_ID),
-                        text=(
-                            f"🛒 <b>New Order (KHQR)</b>\n\n"
-                            f"📦 {emoji_for_html(prod['emoji'])} <b>{prod['name']}</b> × {qty}\n"
-                            f"👤 <code>{user_id}</code>\n"
-                            f"💰 Amount: <b>${amount:.2f}</b>"
-                            + (f"\n🎟 Promo: <code>{promo_data['code']}</code>" if promo_data else "")
-                        ),
-                        parse_mode="HTML",
+                    text = (
+                        f"🛒 <b>New Order (KHQR)</b>\n\n"
+                        f"📦 {emoji_for_html(prod['emoji'])} <b>{prod['name']}</b> × {qty}\n"
+                        f"👤 <code>{user_id}</code>\n"
+                        f"💰 Amount: <b>${amount:.2f}</b>"
                     )
+                    if promo_data:
+                        text += f"\n🎟 Promo: <code>{promo_data['code']}</code>"
+                    await context.bot.send_message(chat_id=int(ORDER_GROUP_ID), text=text, parse_mode="HTML")
             except Exception:
                 pass
             return
@@ -1930,26 +1978,10 @@ async def unified_text_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         try:
             conn = get_db()
             try:
-                db_user = get_or_create_user(conn, user.id, user.username, user.first_name)
-                # Notify on first interaction (new user)
+                get_or_create_user(conn, user.id, user.username, user.first_name)
                 order_count = get_order_count(conn, user.id)
                 if order_count == 0:
-                    try:
-                        from config import NEW_USER_GROUP_ID
-                        if NEW_USER_GROUP_ID:
-                            username = f"@{user.username}" if user.username else "(no username)"
-                            await context.bot.send_message(
-                                chat_id=int(NEW_USER_GROUP_ID),
-                                text=(
-                                    f"🆕 <b>New User</b>\n\n"
-                                    f"👤 {user.first_name or 'N/A'}\n"
-                                    f"📎 {username}\n"
-                                    f"🆔 <code>{user.id}</code>"
-                                ),
-                                parse_mode="HTML",
-                            )
-                    except Exception:
-                        pass
+                    _notify_new_user(context, user)
             finally:
                 conn.close()
         except Exception as e:
