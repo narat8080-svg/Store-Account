@@ -286,11 +286,14 @@ def _sb() -> object | None:
     try:
         from config import SUPABASE_URL, SUPABASE_KEY
         if not SUPABASE_URL:
+            logger.warning("Supabase URL not configured — emoji sync disabled")
             return None
         from supabase import create_client
         _sb_client = create_client(SUPABASE_URL, SUPABASE_KEY)
+        logger.info("Supabase client connected for emoji/button sync")
         return _sb_client
-    except Exception:
+    except Exception as e:
+        logger.error(f"Failed to create Supabase client: {e}")
         return None
 
 
@@ -298,15 +301,15 @@ def _supabase_store(key: str, data: dict) -> None:
     """Store a JSON-serializable dict to Supabase bot_settings using upsert."""
     s = _sb()
     if not s:
+        logger.warning(f"Supabase not available — cannot store {key}")
         return
     try:
-        # Upsert (single atomic op) — safer than delete+insert which can end up empty on partial failure.
         s.table('bot_settings').upsert(
             {'key': key, 'value': json.dumps(data, ensure_ascii=False)},
             on_conflict='key'
         ).execute()
-    except Exception:
-        pass  # Supabase unavailable, local file is fallback
+    except Exception as e:
+        logger.error(f"Supabase store failed for {key}: {e}")
 
 
 def _supabase_load(key: str) -> dict | None:
@@ -318,8 +321,8 @@ def _supabase_load(key: str) -> dict | None:
         r = s.table('bot_settings').select('value').eq('key', key).execute()
         if r.data:
             return json.loads(r.data[0]['value'])
-    except Exception:
-        pass
+    except Exception as e:
+        logger.error(f"Supabase load failed for {key}: {e}")
     return None
 
 

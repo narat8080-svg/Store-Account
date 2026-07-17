@@ -2749,8 +2749,9 @@ async def admin_button_styles(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     await query.edit_message_text(
         "🎨 <b>Button Styles</b>\n\n"
-        "Select a section to customize button colors.\n"
-        "🔵 Blue = primary | 🟢 Green = success | 🔴 Red = danger | ⚪ Gray = default",
+        "Select a section to customize button <b>premium emoji icons</b>.\n"
+        "⚠️ <b>Note:</b> Telegram API does not support button colors.\n"
+        "You CAN set premium custom emojis for button icons here.",
         parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons)
     )
 

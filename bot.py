@@ -294,12 +294,13 @@ def _make_smart_button(text: str, callback_data: str, key: str = None,
 
 def _safe_button(text: str, callback_data: str,
                  icon_custom_emoji_id: str = None, style: str = None) -> InlineKeyboardButton:
-    """Create an InlineKeyboardButton safely — strips unsupported kwargs on old PTB."""
+    """Create an InlineKeyboardButton safely.
+    NOTE: 'style' param is ignored — Telegram Bot API does not support colored buttons.
+    Button colors can only be achieved via premium custom emoji icons."""
     kwargs = {"text": text, "callback_data": callback_data}
     if icon_custom_emoji_id:
         kwargs["icon_custom_emoji_id"] = str(icon_custom_emoji_id)
-    if style:
-        kwargs["style"] = style
+    # style intentionally omitted — not supported by Telegram API
     try:
         return InlineKeyboardButton(**kwargs)
     except TypeError:
