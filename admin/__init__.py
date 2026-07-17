@@ -1840,10 +1840,6 @@ async def admin_customize(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     query = update.callback_query
     await query.answer()
 
-    # Count premium emojis already set
-    all_emojis = get_all()
-    premium_count = sum(1 for v in all_emojis.values() if isinstance(v, dict) and v.get("p"))
-
     keyboard = [
         [_styled_btn("🎨 Set Emoji", "custom_set_emoji", "admin_dashboard")],
         [_styled_btn("🔄 Reset All Emojis", "custom_reset_all", "admin_close")],
@@ -1851,15 +1847,10 @@ async def admin_customize(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     ]
 
     await query.edit_message_text(
-        f"🎨 <b>Customize Bot</b>\n\n"
-        f"Change emojis used throughout the bot.\n"
-        f"⭐ Premium emojis active: <b>{premium_count}</b>\n\n"
-        f"<b>How to set a premium animated emoji:</b>\n"
-        f"1. Tap <b>Set Emoji</b> → pick a key\n"
-        f"2. Tap <b>Set Emoji</b> or <b>Update Emoji</b>\n"
-        f"3. Open Telegram's emoji/sticker panel\n"
-        f"4. Send an <b>animated custom emoji</b>\n\n"
-        f"<i>All keys support premium emojis — including menu, shop, wallet, admin, and more.</i>",
+        "🎨 <b>Customize Bot</b>\n\n"
+        "Change emojis used throughout the bot.\n"
+        "Tap <b>Set Emoji</b> to pick a section and customize its emoji.\n\n"
+        "<i>Send a premium animated emoji from Telegram's sticker panel to use custom emojis on buttons.</i>",
         parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -1908,7 +1899,7 @@ async def custom_reset_all_confirm(update: Update, context: ContextTypes.DEFAULT
 
 
 async def custom_sections(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show all sections with premium emoji counts per section."""
+    """Show all sections in a grid."""
     query = update.callback_query
     await query.answer()
 
@@ -1922,13 +1913,7 @@ async def custom_sections(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     buttons = []
     row = []
     for name in section_names:
-        if name == "🧩 Other":
-            keys = extras
-        else:
-            keys = SECTIONS.get(name, [])
-        premium_in = sum(1 for k in keys if isinstance(all_emojis.get(k), dict) and all_emojis.get(k, {}).get("p"))
-        label = f"⭐ {name} ({premium_in})" if premium_in > 0 else name
-        row.append(_styled_btn(label, f"custom_sec_{name}", "admin_dashboard"))
+        row.append(_styled_btn(name, f"custom_sec_{name}", "admin_dashboard"))
         if len(row) == 2:
             buttons.append(row)
             row = []
@@ -1938,7 +1923,7 @@ async def custom_sections(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     buttons.append([_styled_btn("🔙 Back", "admin_customize", "admin_close")])
 
     await query.edit_message_text(
-        "🎨 <b>Set Emoji</b>\n\nSelect a section to customize its emojis.\n⭐ = premium emojis set in that section.",
+        "🎨 <b>Set Emoji</b>\n\nSelect a section to customize its emojis:",
         parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons)
     )
 
@@ -1966,12 +1951,10 @@ async def custom_section_detail(update: Update, context: ContextTypes.DEFAULT_TY
         current = get_plain(key)  # plain fallback for button display
         premium_id = get_premium_id(key)
         label = LABELS.get(key, key)
-        # ⭐ indicator for premium emoji keys
-        prefix = "⭐ " if premium_id else ""
-        btn_kwargs = {"text": f"{prefix}{current} {label[:12]}", "callback_data": f"custom_emoji_{key}"}
+        btn_kwargs = {"text": f"{current} {label[:12]}", "callback_data": f"custom_emoji_{key}"}
         if premium_id:
             btn_kwargs["icon_custom_emoji_id"] = premium_id
-            btn_kwargs["text"] = f"⭐ {label[:14]}"  # icon + star
+            btn_kwargs["text"] = label[:14]  # shorter text since icon takes space
         row.append(InlineKeyboardButton(**btn_kwargs))
         if len(row) == 3:
             buttons.append(row)
@@ -2044,19 +2027,18 @@ async def custom_set_value_start(update: Update, context: ContextTypes.DEFAULT_T
     premium_id = get_premium_id(key)
     premium_info = ""
     if premium_id:
-        premium_info = f"\n⭐ Current premium ID: <code>{premium_id}</code>"
+        premium_info = f"\nPremium ID: <code>{premium_id}</code>"
 
     action = "Update" if is_update else "Set"
     await query.edit_message_text(
         f"✏️ <b>{action} Emoji for:</b> {label}\n"
         f"Current: {current}{premium_info}\n\n"
         f"<b>Send the new emoji now:</b>\n\n"
-        f"⭐ <b>For premium animated emoji:</b>\n"
+        f"<b>Premium animated emoji:</b>\n"
         f"  • Open Telegram's emoji/sticker panel\n"
-        f"  • Tap an <b>animated custom emoji</b>\n"
-        f"  • It renders with the custom animation\n\n"
-        f"<b>For normal emoji:</b>\n"
-        f"  • Just type the emoji (e.g. ⭐)\n\n"
+        f"  • Tap an animated custom emoji\n\n"
+        f"<b>Normal emoji:</b>\n"
+        f"  • Just type the emoji character\n\n"
         f"<i>Send ONLY the emoji — no extra text.</i>",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([[
