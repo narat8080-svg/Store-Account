@@ -1612,6 +1612,8 @@ async def _handle_custom_order(update: Update, context: ContextTypes.DEFAULT_TYP
             _make_smart_button("Browse Products", "menu_product", "menu_product"),
         ]]),
     )
+
+
 async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show user's order history as tappable buttons."""
     query = update.callback_query
