@@ -335,7 +335,7 @@ def _main_menu_keyboard() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(
-                f"{_safe_emoji('support')} Support".strip(),
+                f"💜 Support",
                 url=f"https://t.me/{SUPPORT_USERNAME.lstrip('@')}",
             ),
         ],
