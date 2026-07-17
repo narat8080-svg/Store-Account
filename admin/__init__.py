@@ -30,7 +30,7 @@ from config import ADMIN_ID
 from utils.emoji_manager import (get_all, get as eget, get_plain, get_premium_id,
                            set_emoji, reset, SECTIONS, LABELS, DEFAULTS,
                            emoji_for_html, emoji_for_button, emoji_premium_id,
-                           parse_db_emoji)
+                           parse_db_emoji, load_button_config, get_button_style)
 from services.database import (
     add_category,
     add_product,
@@ -92,6 +92,24 @@ def _cat_btn(label: str, callback_data: str, db_emoji) -> InlineKeyboardButton:
     kwargs = {"text": label, "callback_data": callback_data}
     if icon_id:
         kwargs["icon_custom_emoji_id"] = icon_id
+    try:
+        return InlineKeyboardButton(**kwargs)
+    except TypeError:
+        return InlineKeyboardButton(text=label, callback_data=callback_data)
+
+
+def _styled_btn(label: str, callback_data: str, key: str) -> InlineKeyboardButton:
+    """
+    Create a styled admin button using button_config.json for colors.
+    Uses plain emoji text (not premium IDs) — simple and reliable.
+    """
+    btn_cfg = load_button_config()
+    cfg = btn_cfg.get(key, {}) if btn_cfg else {}
+    style = cfg.get("style") if isinstance(cfg, dict) else None
+
+    kwargs = {"text": label, "callback_data": callback_data}
+    if style and style != "none":
+        kwargs["style"] = style
     try:
         return InlineKeyboardButton(**kwargs)
     except TypeError:
@@ -167,21 +185,21 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     context.user_data.pop("admin_data", None)
 
     keyboard = [
-        [InlineKeyboardButton("📊 Dashboard", callback_data="admin_dashboard")],
-        [InlineKeyboardButton("📦 Products", callback_data="admin_products")],
-        [InlineKeyboardButton("📥 Stock", callback_data="admin_stock_menu"),
-         InlineKeyboardButton("🎟 Promos", callback_data="admin_promos")],
-        [InlineKeyboardButton("👥 Users", callback_data="admin_users"),
-         InlineKeyboardButton("📈 Reports", callback_data="admin_reports")],
-        [InlineKeyboardButton("🛒 Orders", callback_data="admin_orders_mgmt"),
-         InlineKeyboardButton("💵 Payments", callback_data="admin_payments")],
-        [InlineKeyboardButton("📢 Broadcast", callback_data="admin_broadcast")],
-        [InlineKeyboardButton("🎨 Customize", callback_data="admin_customize"),
-         InlineKeyboardButton("🎨 Button Styles", callback_data="admin_button_styles")],
-        [InlineKeyboardButton("⚙️ Settings", callback_data="admin_settings"),
-         InlineKeyboardButton("💾 Backup", callback_data="admin_backup")],
-        [InlineKeyboardButton("📥 Export CSV", callback_data="admin_export_csv")],
-        [InlineKeyboardButton("🔙 Close", callback_data="menu_start")],
+        [_styled_btn("📊 Dashboard", "admin_dashboard", "admin_dashboard")],
+        [_styled_btn("📦 Products", "admin_products", "admin_products")],
+        [_styled_btn("📥 Stock", "admin_stock_menu", "admin_stock"),
+         _styled_btn("🎟 Promos", "admin_promos", "admin_promos")],
+        [_styled_btn("👥 Users", "admin_users", "admin_users_btn"),
+         _styled_btn("📈 Reports", "admin_reports", "admin_reports")],
+        [_styled_btn("🛒 Orders", "admin_orders_mgmt", "admin_orders"),
+         _styled_btn("💵 Payments", "admin_payments", "admin_payments")],
+        [_styled_btn("📢 Broadcast", "admin_broadcast", "admin_broadcast")],
+        [_styled_btn("🎨 Customize", "admin_customize", "admin_customize"),
+         _styled_btn("🎨 Button Styles", "admin_button_styles", "admin_button_styles")],
+        [_styled_btn("⚙️ Settings", "admin_settings", "admin_settings"),
+         _styled_btn("💾 Backup", "admin_backup", "admin_backup")],
+        [_styled_btn("📥 Export CSV", "admin_export_csv", "admin_export")],
+        [_styled_btn("🔙 Close", "menu_start", "admin_close")],
     ]
 
     text = "🛠 <b>Admin Panel</b>\n\nManage your store:"
@@ -217,12 +235,12 @@ async def admin_categories(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         text = "📂 <b>Categories</b>\n\nNo categories yet."
 
     keyboard = [
-        [InlineKeyboardButton("➕ Add Category", callback_data="admin_add_category")],
+        [_styled_btn("➕ Add Category", "admin_add_category", "admin_dashboard")],
     ]
     if cats:
-        keyboard.append([InlineKeyboardButton("✏️ Edit Category", callback_data="admin_edit_category")])
-        keyboard.append([InlineKeyboardButton("🗑 Delete Category", callback_data="admin_del_category")])
-    keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="admin_panel")])
+        keyboard.append([_styled_btn("✏️ Edit Category", "admin_edit_category", "admin_products")])
+        keyboard.append([_styled_btn("🗑 Delete Category", "admin_del_category", "admin_close")])
+    keyboard.append([_styled_btn("🔙 Back", "admin_panel", "admin_close")])
 
     await query.edit_message_text(
         text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard)
@@ -361,10 +379,10 @@ async def admin_products(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         text = "📦 <b>Products</b>\n\nNo products yet."
 
     keyboard = [
-        [InlineKeyboardButton("➕ Add Product", callback_data="admin_add_product")],
-        [InlineKeyboardButton("✏️ Edit Product", callback_data="admin_edit_product")],
-        [InlineKeyboardButton("🗑 Delete Product", callback_data="admin_del_product")],
-        [InlineKeyboardButton("🔙 Back", callback_data="admin_panel")],
+        [_styled_btn("➕ Add Product", "admin_add_product", "admin_dashboard")],
+        [_styled_btn("✏️ Edit Product", "admin_edit_product", "admin_products")],
+        [_styled_btn("🗑 Delete Product", "admin_del_product", "admin_close")],
+        [_styled_btn("🔙 Back", "admin_panel", "admin_close")],
     ]
 
     await query.edit_message_text(
@@ -556,8 +574,8 @@ async def admin_add_stock_start(update: Update, context: ContextTypes.DEFAULT_TY
         await query.edit_message_text(
             "❌ No products exist. Please create a product first.",
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("➕ Add Product", callback_data="admin_add_product"),
-                InlineKeyboardButton("🔙 Back", callback_data="admin_stock_menu"),
+                _styled_btn("➕ Add Product", "admin_add_product", "admin_dashboard"),
+                _styled_btn("🔙 Back", "admin_stock_menu", "admin_close"),
             ]]),
         )
         return
@@ -855,8 +873,8 @@ async def admin_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await query.edit_message_text(
         text, parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("🔄 Refresh", callback_data="admin_dashboard"),
-            InlineKeyboardButton("🔙 Back", callback_data="admin_panel"),
+            _styled_btn("🔄 Refresh", "admin_dashboard", "admin_dashboard"),
+            _styled_btn("🔙 Back", "admin_panel", "admin_close"),
         ]]),
     )
 
@@ -889,11 +907,11 @@ async def admin_promos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         text = "🎟 <b>Promo Codes</b>\n\nNo promo codes yet."
 
     keyboard = [
-        [InlineKeyboardButton("➕ Create Promo", callback_data="admin_add_promo")],
+        [_styled_btn("➕ Create Promo", "admin_add_promo", "admin_dashboard")],
     ]
     if promos:
-        keyboard.append([InlineKeyboardButton("🗑 Delete Promo", callback_data="admin_del_promo")])
-    keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="admin_panel")])
+        keyboard.append([_styled_btn("🗑 Delete Promo", "admin_del_promo", "admin_close")])
+    keyboard.append([_styled_btn("🔙 Back", "admin_panel", "admin_close")])
 
     await query.edit_message_text(
         text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard)
@@ -1364,7 +1382,7 @@ async def admin_editstock_replace_start(update: Update, context: ContextTypes.DE
 # USER MANAGEMENT
 # ===========================================================================
 async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show user stats + search only (no list)."""
+    """User management hub — stats, search, browse all users."""
     query = update.callback_query
     await query.answer()
 
@@ -1372,6 +1390,10 @@ async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     try:
         all_users = get_all_users(conn, include_banned=True)
         active_users = get_all_users(conn, include_banned=False)
+        # Count VIP users
+        vip_count = sum(1 for u in all_users if u.get("vip_tier", "regular") != "regular")
+        # Total balances
+        total_balance = sum(float(u.get("balance", 0)) for u in all_users)
     finally:
         conn.close()
 
@@ -1381,14 +1403,21 @@ async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     text = (
         f"👥 <b>User Management</b>\n\n"
-        f"👤 Total Users: <b>{total}</b>\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"👤 <b>Total Users: {total}</b>\n"
+        f"━━━━━━━━━━━━━━━━\n"
         f"✅ Active: <b>{active}</b>\n"
-        f"🚫 Banned: <b>{banned}</b>"
+        f"🚫 Banned: <b>{banned}</b>\n"
+        f"⭐ VIP Users: <b>{vip_count}</b>\n"
+        f"💰 Total Balances: <b>${total_balance:.2f}</b>\n"
+        f"\n📋 <i>Use the buttons below to manage users.</i>"
     )
 
     keyboard = [
-        [InlineKeyboardButton("🔍 Search by User ID", callback_data="admin_search_user")],
-        [InlineKeyboardButton("🔙 Back", callback_data="admin_panel")],
+        [_styled_btn(f"📋 View All Users ({total})", "admin_users_enhanced_0", "admin_users_btn")],
+        [_styled_btn("🔍 Search by ID", "admin_search_user", "admin_users_btn")],
+        [_styled_btn("⭐ VIP Management", "admin_users_enhanced_0", "admin_users_btn")],
+        [_styled_btn("🔙 Back", "admin_panel", "admin_close")],
     ]
 
     await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -1465,19 +1494,19 @@ async def admin_user_detail(update: Update, context: ContextTypes.DEFAULT_TYPE,
             text += f"  {emoji_for_html(o.get('product_emoji','📦'))} {o.get('product_name','?')} — ${o['amount']:.2f}\n"
 
     keyboard = [
-        [InlineKeyboardButton("💰 Add Balance", callback_data=f"admin_addbal_{user_id}"),
-         InlineKeyboardButton("💸 Deduct", callback_data=f"admin_deduct_{user_id}")],
-        [InlineKeyboardButton("⭐ Set VIP", callback_data=f"admin_vip_set_{user_id}"),
-         InlineKeyboardButton("📋 Full Orders", callback_data=f"admin_user_orders_{user_id}")],
+        [_styled_btn("💰 Add Balance", f"admin_addbal_{user_id}", "admin_dashboard"),
+         _styled_btn("💸 Deduct", f"admin_deduct_{user_id}", "admin_close")],
+        [_styled_btn("⭐ Set VIP", f"admin_vip_set_{user_id}", "admin_products"),
+         _styled_btn("📋 Full Orders", f"admin_user_orders_{user_id}", "admin_orders")],
     ]
     if banned:
-        keyboard.append([InlineKeyboardButton("✅ Unban User", callback_data=f"admin_unban_{user_id}")])
+        keyboard.append([_styled_btn("✅ Unban User", f"admin_unban_{user_id}", "admin_dashboard")])
     else:
-        keyboard.append([InlineKeyboardButton("🚫 Ban User", callback_data=f"admin_ban_{user_id}")])
+        keyboard.append([_styled_btn("🚫 Ban User", f"admin_ban_{user_id}", "admin_close")])
 
     keyboard.append([
-        InlineKeyboardButton("📩 Send DM", callback_data=f"admin_dm_{user_id}"),
-        InlineKeyboardButton("🔙 Back", callback_data="admin_list_users"),
+        _styled_btn("📩 Send DM", f"admin_dm_{user_id}", "admin_broadcast"),
+        _styled_btn("🔙 Back", "admin_users", "admin_close"),
     ])
 
     if query:
@@ -2349,25 +2378,42 @@ async def admin_pay_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 # ENHANCED USER MANAGEMENT
 # ===========================================================================
 async def admin_users_enhanced(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show enhanced user list with stats."""
+    """Show paginated user list with stats (15 per page)."""
     query = update.callback_query
     await query.answer()
 
+    # Parse page from callback: "admin_users_enhanced_0"
+    data = query.data or "admin_users_enhanced_0"
+    try:
+        page = int(data.replace("admin_users_enhanced_", "").split("_")[0])
+    except (ValueError, IndexError):
+        page = 0
+
+    per_page = 15
+
     conn = get_db()
     try:
-        users = get_users_with_stats(conn, limit=30)
+        all_users_list = get_users_with_stats(conn, limit=500)
     finally:
         conn.close()
 
-    if not users:
-        await query.edit_message_text("👥 No users yet.",
+    total_users = len(all_users_list)
+    total_pages = max(1, (total_users + per_page - 1) // per_page)
+    page = max(0, min(page, total_pages - 1))
+
+    start = page * per_page
+    end = start + per_page
+    page_users = all_users_list[start:end]
+
+    if not page_users:
+        await query.edit_message_text("👥 No users found.",
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 Back", callback_data="admin_users")
+                _styled_btn("🔙 Back", "admin_users", "admin_close")
             ]]))
         return
 
     buttons = []
-    for u in users:
+    for u in page_users:
         ban_icon = "🚫" if u.get("is_banned") else "✅"
         vip = f" [{u.get('vip_tier','regular')}]" if u.get("vip_tier") != "regular" else ""
         name = u.get("first_name") or f"ID:{u['user_id']}"
@@ -2376,10 +2422,24 @@ async def admin_users_enhanced(update: Update, context: ContextTypes.DEFAULT_TYP
             callback_data=f"admin_user_detail_{u['user_id']}"
         )])
 
-    buttons.append([InlineKeyboardButton("🔙 Back", callback_data="admin_users")])
+    # Pagination row
+    nav_row = []
+    if page > 0:
+        nav_row.append(_styled_btn("⬅️ Prev", f"admin_users_enhanced_{page - 1}", "admin_close"))
+    nav_row.append(InlineKeyboardButton(
+        f"📄 {page + 1}/{total_pages}", callback_data="admin_users_enhanced_same"
+    ))
+    if page < total_pages - 1:
+        nav_row.append(_styled_btn("Next ➡️", f"admin_users_enhanced_{page + 1}", "admin_close"))
+    if nav_row:
+        buttons.append(nav_row)
+
+    buttons.append([_styled_btn("🔙 Back", "admin_users", "admin_close")])
 
     await query.edit_message_text(
-        f"👥 <b>Users</b> (top 30 by spending)\n\nTap for details:",
+        f"👥 <b>All Users</b> ({total_users} total)\n"
+        f"Page {page + 1} of {total_pages} — sorted by spending\n\n"
+        f"<i>Tap a user for details & actions:</i>",
         parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons)
     )
 

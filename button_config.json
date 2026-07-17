@@ -104,6 +104,81 @@
     "icon_custom_emoji_id": null,
     "style": null
   },
+  "admin_dashboard": {
+    "text": null,
+    "icon_custom_emoji_id": null,
+    "style": "primary"
+  },
+  "admin_products": {
+    "text": null,
+    "icon_custom_emoji_id": null,
+    "style": "success"
+  },
+  "admin_stock": {
+    "text": null,
+    "icon_custom_emoji_id": null,
+    "style": "primary"
+  },
+  "admin_promos": {
+    "text": null,
+    "icon_custom_emoji_id": null,
+    "style": "warning"
+  },
+  "admin_users_btn": {
+    "text": null,
+    "icon_custom_emoji_id": null,
+    "style": "primary"
+  },
+  "admin_reports": {
+    "text": null,
+    "icon_custom_emoji_id": null,
+    "style": "primary"
+  },
+  "admin_orders": {
+    "text": null,
+    "icon_custom_emoji_id": null,
+    "style": "primary"
+  },
+  "admin_payments": {
+    "text": null,
+    "icon_custom_emoji_id": null,
+    "style": "success"
+  },
+  "admin_broadcast": {
+    "text": null,
+    "icon_custom_emoji_id": null,
+    "style": "danger"
+  },
+  "admin_customize": {
+    "text": null,
+    "icon_custom_emoji_id": null,
+    "style": "secondary"
+  },
+  "admin_button_styles": {
+    "text": null,
+    "icon_custom_emoji_id": null,
+    "style": "secondary"
+  },
+  "admin_settings": {
+    "text": null,
+    "icon_custom_emoji_id": null,
+    "style": "secondary"
+  },
+  "admin_backup": {
+    "text": null,
+    "icon_custom_emoji_id": null,
+    "style": "warning"
+  },
+  "admin_export": {
+    "text": null,
+    "icon_custom_emoji_id": null,
+    "style": "primary"
+  },
+  "admin_close": {
+    "text": null,
+    "icon_custom_emoji_id": null,
+    "style": "danger"
+  },
   "_test": {
     "text": "Test",
     "style": "primary"

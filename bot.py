@@ -1988,7 +1988,7 @@ async def _route_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, da
         await admin_pay_list(update, context)
 
     # --- Admin Enhanced Users ---
-    elif data == "admin_users_enhanced":
+    elif data.startswith("admin_users_enhanced"):
         await admin_users_enhanced(update, context)
     elif data.startswith("admin_vip_set_"):
         await admin_user_vip_set(update, context)

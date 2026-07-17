@@ -554,6 +554,12 @@ BTN_SECTIONS = {
     "↩️ Navigation": ["back", "cancel", "confirm"],
     "📦 Stock Status": ["in_stock", "out_of_stock", "low_stock"],
     "📋 Orders": ["order_detail"],
+    "🛠 Admin Panel": [
+        "admin_dashboard", "admin_products", "admin_stock", "admin_promos",
+        "admin_users_btn", "admin_reports", "admin_orders", "admin_payments",
+        "admin_broadcast", "admin_customize", "admin_button_styles",
+        "admin_settings", "admin_backup", "admin_export", "admin_close",
+    ],
 }
 
 BTN_LABELS = {
@@ -578,6 +584,22 @@ BTN_LABELS = {
     "order_detail": "Order Detail Button",
     "pay_wallet": "Pay with Wallet Button",
     "pay_bakong": "Pay with Bakong Button",
+    # Admin Panel
+    "admin_dashboard": "Dashboard Button",
+    "admin_products": "Products Button",
+    "admin_stock": "Stock Button",
+    "admin_promos": "Promos Button",
+    "admin_users_btn": "Users Button",
+    "admin_reports": "Reports Button",
+    "admin_orders": "Orders Button",
+    "admin_payments": "Payments Button",
+    "admin_broadcast": "Broadcast Button",
+    "admin_customize": "Customize Button",
+    "admin_button_styles": "Button Styles Button",
+    "admin_settings": "Settings Button",
+    "admin_backup": "Backup Button",
+    "admin_export": "Export CSV Button",
+    "admin_close": "Close Button",
 }
 
 BTN_STYLE_LABELS = {
