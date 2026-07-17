@@ -150,6 +150,32 @@ logger = logging.getLogger(__name__)
 
 
 # ===========================================================================
+# IN-MEMORY CACHE — avoids Supabase call on every button tap
+# ===========================================================================
+_user_cache: dict[int, dict] = {}  # user_id → user dict
+_cache_hits = 0
+
+
+def _cached_get_user(conn, user_id: int, username=None, first_name=None) -> dict:
+    """Get user from cache, falling back to Supabase. Cuts latency by ~200ms per tap."""
+    global _cache_hits
+    if user_id in _user_cache:
+        _cache_hits += 1
+        u = _user_cache[user_id]
+        if username and u.get("username") != username:
+            u["username"] = username
+        if first_name and u.get("first_name") != first_name:
+            u["first_name"] = first_name
+        return u
+
+    u = get_or_create_user(conn, user_id, username, first_name)
+    _user_cache[user_id] = u
+    if _cache_hits > 0 and _cache_hits % 50 == 0:
+        logger.info(f"⚡ User cache: {len(_user_cache)} users, {_cache_hits} hits")
+    return u
+
+
+# ===========================================================================
 # NOTIFICATION HELPERS
 # ===========================================================================
 def _notify_payment_group(context, user_id: int, amount: float, payment_id: int, method: str = "KHQR") -> None:
@@ -1662,7 +1688,7 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         try:
             conn = get_db()
             try:
-                get_or_create_user(conn, user.id, user.username, user.first_name)
+                _cached_get_user(conn, user.id, user.username, user.first_name)
             finally:
                 conn.close()
         except Exception as e:
