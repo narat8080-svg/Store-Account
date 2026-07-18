@@ -14,7 +14,17 @@ from telegram.ext import (
     filters,
 )
 
-from config import BOT_TOKEN, DEPOSIT_AMOUNTS, ADMIN_ID, SUPPORT_USERNAME, WEBHOOK_URL, WEBHOOK_PORT, WEBHOOK_PATH
+from config import (
+    BOT_TOKEN,
+    DEPOSIT_AMOUNTS,
+    ADMIN_ID,
+    SUPPORT_USERNAME,
+    WEBHOOK_URL,
+    WEBHOOK_PORT,
+    WEBHOOK_PATH,
+    AUTO_BACKUP_HOUR_UTC,
+    AUTO_BACKUP_MINUTE_UTC,
+)
 from utils.emoji_manager import (get as E, get_plain as EP, get_premium_id as EID,
                            emoji_for_html, emoji_for_button, emoji_premium_id,
                            parse_db_emoji, strip_leading_emoji)
@@ -2403,28 +2413,31 @@ async def _handle_custom_deposit(update: Update, context: ContextTypes.DEFAULT_T
 # ===========================================================================
 async def _auto_backup_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Periodic job: save DB snapshot to Supabase.
-    Never posts to groups. Optional DM only to ADMIN_ID (7322712989).
+    Daily job: export store data TO Supabase (auto_backup_latest).
+    Never posts to groups. DM only to ADMIN_ID.
     """
     try:
-        from services.supabase_sync import save_auto_backup_to_supabase
+        from services.supabase_sync import (
+            save_auto_backup_to_supabase,
+            next_auto_backup_utc_str,
+        )
         meta = await asyncio.to_thread(save_auto_backup_to_supabase)
         logger.info(
             f"☁️ Auto-backup OK: {meta.get('total_rows', 0)} rows @ {meta.get('timestamp')}"
         )
-        # Silent for everyone except admin private DM
         try:
             await context.bot.send_message(
                 chat_id=int(ADMIN_ID),
                 text=(
-                    f"☁️ <b>Auto-backup complete</b> (admin only)\n\n"
-                    f"📅 {meta.get('timestamp')}\n"
-                    f"📊 {meta.get('total_rows', 0)} rows saved to Supabase"
+                    f"☁️ <b>Daily auto-backup complete</b> (admin only)\n\n"
+                    f"📅 Saved at: <b>{meta.get('timestamp')}</b>\n"
+                    f"📊 {meta.get('total_rows', 0)} rows → Supabase\n"
+                    f"⏰ Next run: <b>{next_auto_backup_utc_str()}</b>"
                 ),
                 parse_mode="HTML",
             )
         except Exception:
-            pass  # admin may not have started bot yet
+            pass
     except Exception as e:
         logger.error(f"☁️ Auto-backup job failed: {e}")
         try:
@@ -2438,20 +2451,44 @@ async def _auto_backup_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def _post_init(app: Application) -> None:
-    """Start scheduled auto-backup after the application is ready."""
-    if app.job_queue:
-        app.job_queue.run_repeating(
-            _auto_backup_job,
-            interval=24 * 60 * 60,  # 24 hours
-            first=120,             # 2 minutes after start
-            name="supabase_auto_backup",
-        )
-        logger.info("☁️ Supabase auto-backup scheduled (every 24h, first in 2 min, admin DM only)")
-    else:
+    """Schedule daily auto-backup TO Supabase at fixed UTC time."""
+    if not app.job_queue:
         logger.warning(
             "☁️ JobQueue not available — install python-telegram-bot[job-queue] "
             "for scheduled auto-backup. Manual backup still works."
         )
+        return
+
+    from datetime import time as dt_time, timezone
+    from services.supabase_sync import auto_backup_schedule_label, next_auto_backup_utc_str
+
+    h = max(0, min(23, int(AUTO_BACKUP_HOUR_UTC)))
+    m = max(0, min(59, int(AUTO_BACKUP_MINUTE_UTC)))
+    run_at = dt_time(hour=h, minute=m, tzinfo=timezone.utc)
+
+    # Daily at configured UTC time (default 00:00 UTC)
+    app.job_queue.run_daily(
+        _auto_backup_job,
+        time=run_at,
+        name="supabase_auto_backup_daily",
+    )
+
+    # First snapshot ~2 min after boot if none exists yet (so restore is available)
+    async def _boot_backup_if_needed(context: ContextTypes.DEFAULT_TYPE) -> None:
+        try:
+            from services.supabase_sync import get_auto_backup_meta
+            if get_auto_backup_meta() is None:
+                logger.info("☁️ No Supabase auto-backup yet — running first snapshot")
+                await _auto_backup_job(context)
+        except Exception as e:
+            logger.warning(f"☁️ Boot auto-backup check failed: {e}")
+
+    app.job_queue.run_once(_boot_backup_if_needed, when=120, name="supabase_auto_backup_boot")
+
+    logger.info(
+        f"☁️ Supabase auto-backup scheduled daily at {auto_backup_schedule_label()} "
+        f"(next ≈ {next_auto_backup_utc_str()}, admin DM only)"
+    )
 
 
 # ===========================================================================

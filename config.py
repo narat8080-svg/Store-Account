@@ -12,6 +12,11 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 # Only this Telegram user may access admin + backup info
 ADMIN_ID = int(os.getenv("ADMIN_ID", "7322712989") or "7322712989")
 
+# Auto-backup schedule (saves full store snapshot INTO Supabase bot_settings)
+# Runs once per day at this UTC clock time (default 00:00 UTC)
+AUTO_BACKUP_HOUR_UTC = int(os.getenv("AUTO_BACKUP_HOUR_UTC", "0") or "0")
+AUTO_BACKUP_MINUTE_UTC = int(os.getenv("AUTO_BACKUP_MINUTE_UTC", "0") or "0")
+
 # ---------------------------------------------------------------------------
 # Bakong KHQR (legacy SDK — kept for backward compatibility)
 # ---------------------------------------------------------------------------

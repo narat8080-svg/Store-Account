@@ -157,6 +157,33 @@ AUTO_BACKUP_HISTORY_KEY = "auto_backup_history"  # list of last 3 meta + data ke
 AUTO_BACKUP_KEEP = 3
 
 
+def auto_backup_schedule_label() -> str:
+    """Human schedule string (UTC) for admin UI."""
+    try:
+        from config import AUTO_BACKUP_HOUR_UTC, AUTO_BACKUP_MINUTE_UTC
+        h = max(0, min(23, int(AUTO_BACKUP_HOUR_UTC)))
+        m = max(0, min(59, int(AUTO_BACKUP_MINUTE_UTC)))
+    except Exception:
+        h, m = 0, 0
+    return f"{h:02d}:{m:02d} UTC every day"
+
+
+def next_auto_backup_utc_str() -> str:
+    """Next daily auto-backup time in UTC."""
+    from datetime import datetime, timezone, timedelta
+    try:
+        from config import AUTO_BACKUP_HOUR_UTC, AUTO_BACKUP_MINUTE_UTC
+        h = max(0, min(23, int(AUTO_BACKUP_HOUR_UTC)))
+        m = max(0, min(59, int(AUTO_BACKUP_MINUTE_UTC)))
+    except Exception:
+        h, m = 0, 0
+    now = datetime.now(timezone.utc)
+    nxt = now.replace(hour=h, minute=m, second=0, microsecond=0)
+    if nxt <= now:
+        nxt = nxt + timedelta(days=1)
+    return nxt.strftime("%Y-%m-%d %H:%M UTC")
+
+
 def save_auto_backup_to_supabase() -> dict:
     """
     Export all tables and store the latest backup in Supabase bot_settings.

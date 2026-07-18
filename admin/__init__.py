@@ -3106,19 +3106,37 @@ async def admin_backup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     await query.answer()
 
-    auto_line = "<i>No auto-backup yet — first run after deploy (~2 min).</i>"
+    # Schedule + last snapshot time from Supabase (admin only)
+    try:
+        from services.supabase_sync import auto_backup_schedule_label, next_auto_backup_utc_str
+        schedule = auto_backup_schedule_label()
+        next_run = next_auto_backup_utc_str()
+    except Exception:
+        schedule = "00:00 UTC every day"
+        next_run = "?"
+
+    auto_line = (
+        f"⏰ Schedule: <b>{schedule}</b>\n"
+        f"⏭ Next run: <b>{next_run}</b>\n"
+        f"<i>No snapshot in Supabase yet — first run after deploy (~2 min) or use Run Now.</i>"
+    )
     try:
         from services.supabase_sync import get_auto_backup_meta, get_auto_backup_history
         meta = get_auto_backup_meta()
         hist = get_auto_backup_history()
         if meta:
             auto_line = (
-                f"✅ Last auto-backup: <b>{meta.get('timestamp', '?')}</b>\n"
-                f"📊 {meta.get('total_rows', 0)} rows · stored in Supabase\n"
-                f"🗂 Snapshots kept: <b>{len(hist) or 1}</b>"
+                f"⏰ Schedule: <b>{schedule}</b>\n"
+                f"⏭ Next run: <b>{next_run}</b>\n"
+                f"✅ Last backup (Supabase): <b>{meta.get('timestamp', '?')}</b>\n"
+                f"📊 {meta.get('total_rows', 0)} rows · snapshots kept: <b>{len(hist) or 1}</b>"
             )
     except Exception as e:
-        auto_line = f"⚠️ Auto-backup status unavailable: {e}"
+        auto_line = (
+            f"⏰ Schedule: <b>{schedule}</b>\n"
+            f"⏭ Next run: <b>{next_run}</b>\n"
+            f"⚠️ Status error: {e}"
+        )
 
     keyboard = [
         [InlineKeyboardButton("💾 Create Backup (file)", callback_data="admin_backup_create")],
@@ -3131,10 +3149,10 @@ async def admin_backup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await query.edit_message_text(
         "💾 <b>Backup & Restore</b> <i>(admin only)</i>\n\n"
         f"{auto_line}\n\n"
-        "• <b>Auto-Backup</b>: every 24h → Supabase (silent for users)\n"
-        "• <b>Run Auto-Backup Now</b>: save cloud snapshot now\n"
-        "• <b>Restore Latest Auto-Backup</b>: load last Supabase snapshot\n"
-        "• <b>Create / Restore file</b>: download or upload JSON\n\n"
+        "• <b>Auto-Backup</b>: daily at fixed time → <b>saves TO Supabase</b>\n"
+        "• <b>Restore Latest</b>: loads latest snapshot <b>FROM Supabase</b>\n"
+        "• <b>Run Now</b>: save a new Supabase snapshot immediately\n"
+        "• <b>File</b>: download / upload JSON\n\n"
         "⚠️ Restore overwrites live store data.\n"
         "🔒 Backup info is never shown to other users.",
         parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard)
