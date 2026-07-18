@@ -85,6 +85,9 @@ DEFAULTS = {
     "deposit_custom": "✏️",
     # Notifications & files
     "restock_alert": "📢",
+    "alert_order": "🛒",
+    "alert_payment": "💵",
+    "alert_new_user": "🆕",
     "file_download": "📄",
     "order_detail": "📋",
     "description": "📝",
@@ -120,6 +123,9 @@ SECTIONS = {
     "💰 Wallet": ["wallet", "deposit", "deposit_custom", "balance_add", "balance_deduct", "timer", "expired"],
     "💳 Payment": ["pay_wallet", "pay_bakong"],
     "📋 Orders": ["orders", "order_detail", "file_download"],
+    "🔔 Group & Restock Alerts": [
+        "alert_order", "alert_payment", "alert_new_user", "restock_alert",
+    ],
     "🛠 Admin": ["admin", "dashboard", "categories", "products", "stock", "promos", "users", "reports"],
     "🛠 Admin Buttons": [
         "admin_dashboard", "admin_products", "admin_stock", "admin_promos",
@@ -194,7 +200,10 @@ LABELS = {
     "qty_plus": "Increase Qty (+)",
     "qty_custom": "Custom Quantity",
     "deposit_custom": "Custom Deposit",
-    "restock_alert": "Restock Alert",
+    "restock_alert": "Restock Alert (to users)",
+    "alert_order": "Order Group Alert",
+    "alert_payment": "Payment Group Alert",
+    "alert_new_user": "New User Group Alert",
     "file_download": "File Download",
     "order_detail": "Order Detail",
     "description": "Description",

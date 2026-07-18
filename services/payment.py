@@ -199,6 +199,7 @@ async def auto_check_payment(
                 try:
                     from config import PAYMENT_GROUP_ID
                     from services.database import get_db as _gdb, get_or_create_user as _gu
+                    from utils.emoji_manager import get as E
                     c2 = _gdb()
                     try:
                         u = _gu(c2, user_id)
@@ -210,12 +211,12 @@ async def auto_check_payment(
                     finally:
                         c2.close()
                     table_msg = (
-                        f"💵 <b>Payment / Deposit Confirmed</b>\n\n"
-                        f"👤 User: {username}\n"
-                        f"🆔 ID: <code>{user_id}</code>\n"
-                        f"💰 Amount: <b>${amount:.2f}</b>\n"
-                        f"🏷 Payment #: <code>{payment_id}</code>\n"
-                        f"💳 Method: Bakong KHQR"
+                        f"{E('alert_payment')} <b>Payment / Deposit Confirmed</b>\n\n"
+                        f"{E('profile')} User: {username}\n"
+                        f"{E('id_label')} ID: <code>{user_id}</code>\n"
+                        f"{E('price_label')} Amount: <b>${amount:.2f}</b>\n"
+                        f"{E('order_detail')} Payment #: <code>{payment_id}</code>\n"
+                        f"{E('pay_wallet')} Method: Bakong KHQR"
                     )
                     await context.bot.send_message(
                         chat_id=int(PAYMENT_GROUP_ID),

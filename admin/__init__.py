@@ -128,38 +128,67 @@ def _styled_btn(label: str, callback_data: str, key: str) -> InlineKeyboardButto
 
 
 async def _send_restock_notify(context, prod: dict, stock: int, chat_id: int) -> None:
-    """Send restock notification to all users who bought or may be interested."""
+    """Send restock notification to users (only when restock_notify is ON).
+    Uses customizable premium emojis from Customize → 🔔 Group & Restock Alerts.
+    """
     from services.database import get_db, get_all_users, get_bot_setting
+
+    # Double-check setting — never spam if admin turned alerts OFF
+    conn = get_db()
+    try:
+        notify_on = get_bot_setting(conn, "restock_notify", "off") == "on"
+        users = get_all_users(conn) if notify_on else []
+    finally:
+        conn.close()
+
+    if not notify_on:
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"{eget('warning')} Restock alerts are <b>OFF</b> — no users notified.\n"
+                     f"Turn ON in ⚙️ Settings → Restock Alerts.",
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+        return
 
     name = prod.get("name", "Product")
     price = prod.get("price", 0)
     emoji_raw = prod.get("emoji", "📦")
+    prod_emoji = emoji_for_html(emoji_raw)
 
+    # Premium title + field emojis (Customize → restock_alert, stock_label, price_label, buy)
     notify_msg = (
-        f"{emoji_for_html(emoji_raw)} <b>Restock Alert!</b>\n\n"
-        f"📦 <b>{name}</b>\n"
-        f"💰 Price: <b>${price:.2f}</b>\n"
-        f"📥 Stock: <b>{stock}</b>\n\n"
+        f"{eget('restock_alert')} <b>Restock Alert!</b>\n\n"
+        f"{prod_emoji} <b>{name}</b>\n"
+        f"{eget('price_label')} Price: <b>${price:.2f}</b>\n"
+        f"{eget('stock_label')} Stock: <b>{stock}</b>\n\n"
         f"<i>Tap below to shop now!</i>"
     )
 
-    keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton(
-            f"🛒 Buy Now",
-            callback_data=f"buy_detail_{prod['id']}"
-        )
-    ]])
-
-    conn = get_db()
+    # Buy button with premium icon if set
+    buy_label = "Buy Now"
+    buy_kwargs = {"text": buy_label, "callback_data": f"buy_detail_{prod['id']}"}
+    buy_pid = get_premium_id("buy")
+    if buy_pid:
+        buy_kwargs["icon_custom_emoji_id"] = str(buy_pid)
+    else:
+        buy_kwargs["text"] = f"{get_plain('buy')} {buy_label}".strip()
     try:
-        users = get_all_users(conn)
-    finally:
-        conn.close()
+        buy_btn = InlineKeyboardButton(**buy_kwargs)
+    except TypeError:
+        buy_btn = InlineKeyboardButton(text=buy_kwargs["text"], callback_data=buy_kwargs["callback_data"])
+
+    keyboard = InlineKeyboardMarkup([[buy_btn]])
 
     sent = 0
     for u in users:
         uid = u.get("user_id")
         if not uid or uid == ADMIN_ID:
+            continue
+        # Skip banned users
+        if u.get("is_banned"):
             continue
         try:
             await context.bot.send_message(
@@ -174,11 +203,14 @@ async def _send_restock_notify(context, prod: dict, stock: int, chat_id: int) ->
         await asyncio.sleep(0.05)  # Rate limit safety
 
     # Confirm to admin
-    await context.bot.send_message(
-        chat_id=chat_id,
-        text=f"📢 Restock notification sent to <b>{sent}</b> user(s).",
-        parse_mode="HTML",
-    )
+    try:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"{eget('restock_alert')} Restock notification sent to <b>{sent}</b> user(s).",
+            parse_mode="HTML",
+        )
+    except Exception:
+        pass
 
 
 # ===========================================================================
@@ -2543,7 +2575,7 @@ async def admin_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     try:
         maint = get_bot_setting(conn, "maintenance_mode", "off")
         welcome = get_bot_setting(conn, "welcome_msg", "")
-        restock = get_bot_setting(conn, "restock_notify", "on")
+        restock = get_bot_setting(conn, "restock_notify", "off")
     finally:
         conn.close()
 
@@ -2565,8 +2597,12 @@ async def admin_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await query.edit_message_text(
         f"⚙️ <b>Bot Settings</b>\n\n"
         f"🚧 Maintenance: <b>{'ON' if maint == 'on' else 'OFF'}</b>\n"
-        f"📝 Welcome: {'Custom' if welcome else 'Default'}\n"
-        f"📢 Restock Alerts: <b>{'ON' if restock == 'on' else 'OFF'}</b>\n\n"
+        f"   <i>ON = users cannot shop. OFF = bot is open.</i>\n\n"
+        f"📝 Welcome: {'Custom' if welcome else 'Default'}\n\n"
+        f"📢 Restock Alerts: <b>{'ON' if restock == 'on' else 'OFF'}</b>\n"
+        f"   <i>ON = notify all users when you restock (0 → stock).\n"
+        f"   OFF = no message when you add stock accounts.</i>\n\n"
+        f"🎨 Premium emojis for alerts: Customize → 🔔 Group & Restock Alerts\n\n"
         f"Select a setting to change:",
         parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -2641,21 +2677,33 @@ async def admin_settings_notify(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def admin_settings_restock(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Toggle restock notifications to users."""
+    """Toggle restock notifications to users when admin adds stock."""
     query = update.callback_query
     await query.answer()
 
     conn = get_db()
     try:
-        current = get_bot_setting(conn, "restock_notify", "on")
+        current = get_bot_setting(conn, "restock_notify", "off")
         new_val = "off" if current == "on" else "on"
         set_bot_setting(conn, "restock_notify", new_val)
     finally:
         conn.close()
 
+    if new_val == "on":
+        detail = (
+            f"{eget('success')} <b>ON</b> — when you add stock to a product that was "
+            f"<b>out of stock (0)</b>, all users get a restock message.\n\n"
+            f"Set premium emoji: Customize → 🔔 Group & Restock Alerts → Restock Alert"
+        )
+    else:
+        detail = (
+            f"{eget('warning')} <b>OFF</b> — adding stock accounts will "
+            f"<b>not</b> send any alert to users."
+        )
+
     await query.edit_message_text(
-        f"📢 Restock alerts: <b>{'ON 🔔' if new_val == 'on' else 'OFF 🔕'}</b>\n\n"
-        f"{'Users will be notified when out-of-stock products are restocked.' if new_val == 'on' else 'Restock alerts are disabled.'}",
+        f"{eget('restock_alert')} <b>Restock Alerts: {'ON 🔔' if new_val == 'on' else 'OFF 🔕'}</b>\n\n"
+        f"{detail}",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([[
             InlineKeyboardButton("🔙 Back", callback_data="admin_settings")
@@ -3430,32 +3478,40 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             add_stock_bulk(conn, prod_id, lines)
             prod = get_product(conn, prod_id)
             stock = get_stock_count(conn, prod_id)
+            # Only treat as restock when product was empty and now has stock
             was_restock = (stock_before == 0 and stock > 0)
-            notify_on = get_bot_setting(conn, "restock_notify", "on") == "on"
+            # Default OFF — admin must turn ON Restock Alerts in Settings
+            notify_on = get_bot_setting(conn, "restock_notify", "off") == "on"
         finally:
             conn.close()
 
         context.user_data.pop("admin_state", None)
         context.user_data.pop("admin_data", None)
 
-        # ── Build extra info about restock notification status ──
+        # ── Restock status note for admin ──
         restock_note = ""
         if was_restock:
             if notify_on:
-                restock_note = "\n📢 <i>Restock alert sending to users...</i>"
+                restock_note = f"\n{eget('restock_alert')} <i>Restock alert sending to users...</i>"
             else:
-                restock_note = "\n🔕 <i>Restock alerts OFF — enable in ⚙️ Settings</i>"
+                restock_note = (
+                    f"\n{eget('warning')} <i>Restock alerts OFF — "
+                    f"no message to users. Enable in ⚙️ Settings → Restock Alerts.</i>"
+                )
+        elif not notify_on:
+            restock_note = f"\n🔕 <i>Restock alerts are OFF (Settings).</i>"
 
         await update.message.reply_html(
-            f"✅ <b>{len(lines)} stock item(s)</b> added to {emoji_for_html(prod['emoji'])} {prod['name']}!\n"
-            f"📦 Total stock: <b>{stock}</b>{restock_note}",
+            f"{eget('success')} <b>{len(lines)} stock item(s)</b> added to "
+            f"{emoji_for_html(prod['emoji'])} {prod['name']}!\n"
+            f"{eget('stock_label')} Total stock: <b>{stock}</b>{restock_note}",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("📥 Add More Stock", callback_data="admin_add_stock"),
                 InlineKeyboardButton("🏠 Admin Panel", callback_data="admin_panel"),
             ]]),
         )
 
-        # ── Restock notification to users ──
+        # ── Restock notification to users ONLY if Restock Alerts is ON ──
         if was_restock and notify_on:
             asyncio.create_task(_send_restock_notify(
                 context=context,

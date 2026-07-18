@@ -215,13 +215,14 @@ async def _notify_payment_group(
         if fname:
             user_line = f"{fname} ({user_line})"
 
+        # Premium emojis from Customize → 🔔 Group & Restock Alerts
         text = (
-            f"💵 <b>Payment / Deposit Confirmed</b>\n\n"
-            f"👤 User: {user_line}\n"
-            f"🆔 ID: <code>{user_id}</code>\n"
-            f"💰 Amount: <b>${float(amount):.2f}</b>\n"
-            f"🏷 Payment #: <code>{payment_id}</code>\n"
-            f"💳 Method: {method}"
+            f"{E('alert_payment')} <b>Payment / Deposit Confirmed</b>\n\n"
+            f"{E('profile')} User: {user_line}\n"
+            f"{E('id_label')} ID: <code>{user_id}</code>\n"
+            f"{E('price_label')} Amount: <b>${float(amount):.2f}</b>\n"
+            f"{E('order_detail')} Payment #: <code>{payment_id}</code>\n"
+            f"{E('pay_wallet')} Method: {method}"
         )
         await context.bot.send_message(
             chat_id=int(PAYMENT_GROUP_ID),
@@ -262,18 +263,19 @@ async def _notify_order_group(
         emoji = emoji_for_html(prod.get("emoji", "📦")) if prod else "📦"
         pname = (prod or {}).get("name", "Product")
 
+        # Premium emojis from Customize → 🔔 Group & Restock Alerts
         text = (
-            f"🛒 <b>New Order</b>\n\n"
-            f"📦 {emoji} <b>{pname}</b> × {qty}\n"
-            f"👤 {name + ' ' if name else ''}{username}\n"
-            f"🆔 <code>{uid}</code>\n"
-            f"💰 Amount: <b>${float(total):.2f}</b>\n"
-            f"💳 Pay: {pay_method}"
+            f"{E('alert_order')} <b>New Order</b>\n\n"
+            f"{emoji} <b>{pname}</b> × {qty}\n"
+            f"{E('profile')} {name + ' ' if name else ''}{username}\n"
+            f"{E('id_label')} <code>{uid}</code>\n"
+            f"{E('price_label')} Amount: <b>${float(total):.2f}</b>\n"
+            f"{E('pay_wallet')} Pay: {pay_method}"
         )
         if new_balance is not None:
-            text += f"\n💳 Balance after: <b>${float(new_balance):.2f}</b>"
+            text += f"\n{E('balance_label')} Balance after: <b>${float(new_balance):.2f}</b>"
         if promo_data:
-            text += f"\n🎟 Promo: <code>{promo_data.get('code', '')}</code>"
+            text += f"\n{E('promo_code')} Promo: <code>{promo_data.get('code', '')}</code>"
 
         await context.bot.send_message(
             chat_id=int(ORDER_GROUP_ID),
@@ -294,10 +296,10 @@ async def _notify_new_user(context, user) -> None:
         await context.bot.send_message(
             chat_id=int(NEW_USER_GROUP_ID),
             text=(
-                f"🆕 <b>New User</b>\n\n"
-                f"👤 {user.first_name or 'N/A'}\n"
-                f"📎 {username}\n"
-                f"🆔 <code>{user.id}</code>"
+                f"{E('alert_new_user')} <b>New User</b>\n\n"
+                f"{E('profile')} {user.first_name or 'N/A'}\n"
+                f"{E('username_label')} {username}\n"
+                f"{E('id_label')} <code>{user.id}</code>"
             ),
             parse_mode="HTML",
         )
