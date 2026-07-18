@@ -1969,7 +1969,7 @@ async def custom_sections(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def custom_section_detail(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """List emoji keys with plain labels — no premium icon / color on picker."""
+    """List emoji keys — each button shows THAT key's current emoji (premium or plain)."""
     query = update.callback_query
     await query.answer()
 
@@ -1985,16 +1985,42 @@ async def custom_section_detail(update: Update, context: ContextTypes.DEFAULT_TY
         await query.answer("No emojis in this section", show_alert=True)
         return
 
+    # Alert section: 1 per row (longer labels + clear emoji preview)
+    is_alerts = "Group & Restock" in section_name or "Restock Alert" in section_name
+    per_row = 1 if is_alerts else 2
+
     buttons = []
     row = []
     for key in keys:
         label = LABELS.get(key, key)
         plain = get_plain(key)
-        # Plain unicode + name only. Premium preview is on the detail screen.
-        mark = " ★" if get_premium_id(key) else ""
-        btn_text = f"{plain} {label[:16]}{mark}".strip()
-        row.append(_plain_btn(btn_text, f"custom_emoji_{key}"))
-        if len(row) == 2:
+        premium_id = get_premium_id(key)
+
+        # Show the emoji that belongs to THIS key on the button
+        # (e.g. restock_alert button shows restock_alert's emoji)
+        if premium_id:
+            # Premium icon only for this key — label without unicode duplicate
+            btn_text = strip_leading_emoji(label)[:28] or label[:28]
+            btn_kwargs = {
+                "text": btn_text,
+                "callback_data": f"custom_emoji_{key}",
+                "icon_custom_emoji_id": str(premium_id),
+            }
+        else:
+            btn_kwargs = {
+                "text": f"{plain} {label[:24]}".strip(),
+                "callback_data": f"custom_emoji_{key}",
+            }
+
+        try:
+            btn = InlineKeyboardButton(**btn_kwargs)
+        except TypeError:
+            # Fallback if PTB lacks icon_custom_emoji_id
+            fallback = f"{plain} {label[:24]}".strip()
+            btn = InlineKeyboardButton(text=fallback, callback_data=f"custom_emoji_{key}")
+
+        row.append(btn)
+        if len(row) >= per_row:
             buttons.append(row)
             row = []
     if row:
@@ -2005,7 +2031,7 @@ async def custom_section_detail(update: Update, context: ContextTypes.DEFAULT_TY
     await query.edit_message_text(
         f"🎨 <b>{section_name}</b>\n\n"
         f"Tap an item to customize.\n"
-        f"<i>★ = premium already set (opens with full preview).</i>",
+        f"<i>Each button shows the emoji currently set for that item.</i>",
         parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons)
     )
 
