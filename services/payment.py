@@ -195,32 +195,36 @@ async def auto_check_payment(
                     parse_mode="HTML",
                 )
 
-                # ── Notify payment group with table ──
+                # ── Notify payment group (deposit confirmed) ──
                 try:
                     from config import PAYMENT_GROUP_ID
                     from services.database import get_db as _gdb, get_or_create_user as _gu
                     c2 = _gdb()
                     try:
                         u = _gu(c2, user_id)
-                        username = f"@{u.get('username','')}" if u.get('username') else f"ID:{user_id}"
+                        uname = u.get("username") or ""
+                        fname = u.get("first_name") or ""
+                        username = f"@{uname}" if uname else f"ID:{user_id}"
+                        if fname:
+                            username = f"{fname} ({username})"
                     finally:
                         c2.close()
-                    txn_id = result.get("txn_id", "N/A")[:12]
                     table_msg = (
-                        f"💵 <b>Payment Received</b>\n\n"
-                        f"<pre>"
-                        f"| {'ID':<6} | {'User':<14} | {'Amount':<8} | {'Method':<8} | {'Status':<8} |\n"
-                        f"|{'-'*8}|{'-'*16}|{'-'*10}|{'-'*10}|{'-'*10}|\n"
-                        f"| #{payment_id:<5} | {username:<14} | ${amount:<7.2f} | {'Bakong':<8} | {'Paid ✅':<8} |"
-                        f"</pre>"
+                        f"💵 <b>Payment / Deposit Confirmed</b>\n\n"
+                        f"👤 User: {username}\n"
+                        f"🆔 ID: <code>{user_id}</code>\n"
+                        f"💰 Amount: <b>${amount:.2f}</b>\n"
+                        f"🏷 Payment #: <code>{payment_id}</code>\n"
+                        f"💳 Method: Bakong KHQR"
                     )
                     await context.bot.send_message(
-                        chat_id=PAYMENT_GROUP_ID,
+                        chat_id=int(PAYMENT_GROUP_ID),
                         text=table_msg,
                         parse_mode="HTML",
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    import logging
+                    logging.getLogger(__name__).warning(f"Payment group notify failed: {e}")
             finally:
                 conn.close()
             return

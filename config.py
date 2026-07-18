@@ -42,9 +42,21 @@ DEPOSIT_AMOUNTS = [1, 5, 10, 20, 50, 100]  # USD amounts for quick deposit
 # ---------------------------------------------------------------------------
 # Notification Groups
 # ---------------------------------------------------------------------------
-ORDER_GROUP_ID = os.getenv("ORDER_GROUP_ID", "-1003729530722")
-PAYMENT_GROUP_ID = os.getenv("PAYMENT_GROUP_ID", "-1004352483292")
-NEW_USER_GROUP_ID = os.getenv("NEW_USER_GROUP_ID", "-1004490564374")
+def _env_int(name: str, default: int) -> int:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+# Orders (product purchased) → order alert group
+ORDER_GROUP_ID = _env_int("ORDER_GROUP_ID", -1004352483292)
+# Deposits / payments completed → payment alert group
+PAYMENT_GROUP_ID = _env_int("PAYMENT_GROUP_ID", -1003729530722)
+# New users joining the bot
+NEW_USER_GROUP_ID = _env_int("NEW_USER_GROUP_ID", -1004490564374)
 
 # Support contact
 SUPPORT_USERNAME = os.getenv("SUPPORT_USERNAME", "@Ratofficer")
