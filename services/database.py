@@ -192,19 +192,64 @@ def create_order(conn, user_id, product_id, amount, stock_id=None, promo_code=No
     return r.data[0]['id'] if r.data else 0
 
 def get_user_orders(conn, user_id, limit=20):
+    """
+    Return purchases for this Telegram user only.
+    - Filters by user_id (int) so catalog products never appear as orders
+    - Excludes refunded orders
+    - Client-side re-check of user_id as a safety net
+    """
     s = _get_supabase()
-    r = s.table('orders').select('*').eq('user_id', user_id).order('created_at', desc=True).limit(limit).execute()
+    try:
+        uid = int(user_id)
+    except (TypeError, ValueError):
+        return []
+
+    # Fetch a bit extra so post-filters (status / ownership) still fill the page
+    r = (
+        s.table('orders')
+        .select('*')
+        .eq('user_id', uid)
+        .order('created_at', desc=True)
+        .limit(max(limit * 3, limit))
+        .execute()
+    )
     orders = _rows(r.data)
+
+    result = []
     for o in orders:
-        if o.get('product_id'):
-            pr = s.table('products').select('name,emoji').eq('id', o['product_id']).execute()
-            if pr.data:
-                o['product_name'] = pr.data[0].get('name','')
-                o['product_emoji'] = pr.data[0].get('emoji','📦')
+        # Hard ownership check — never show another user's order
+        try:
+            if int(o.get('user_id', -1)) != uid:
+                continue
+        except (TypeError, ValueError):
+            continue
+
+        status = (o.get('status') or 'completed').lower()
+        if status == 'refunded':
+            continue
+
+        # Skip rows that are not real product purchases
+        if not o.get('product_id'):
+            continue
+
+        pr = s.table('products').select('name,emoji').eq('id', o['product_id']).execute()
+        if pr.data:
+            o['product_name'] = pr.data[0].get('name', '')
+            o['product_emoji'] = pr.data[0].get('emoji', '📦')
+        else:
+            o.setdefault('product_name', f"Product #{o['product_id']}")
+            o.setdefault('product_emoji', '📦')
+
         if o.get('stock_id'):
             sr = s.table('stock').select('detail').eq('id', o['stock_id']).execute()
-            if sr.data: o['stock_detail'] = sr.data[0].get('detail','')
-    return orders
+            if sr.data:
+                o['stock_detail'] = sr.data[0].get('detail', '')
+
+        result.append(o)
+        if len(result) >= limit:
+            break
+
+    return result
 
 def get_orders_today(conn):
     from datetime import datetime

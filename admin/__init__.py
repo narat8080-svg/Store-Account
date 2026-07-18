@@ -3232,10 +3232,12 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     # --- Product Description ---
     elif state == "prod_desc":
-        # Use _message_to_html to capture rich formatting (bold, italic, code, premium emoji)
-        desc = _message_to_html(update.message) if update.message.text else ""
-        if update.message.text and update.message.text.strip().lower() == "/skip":
+        # Capture rich formatting + premium emoji mixed with text (via text_html)
+        raw_text = (update.message.text or "").strip()
+        if raw_text.lower() == "/skip":
             desc = ""
+        else:
+            desc = _message_to_html(update.message) if update.message.text else ""
         cat_id = data.get("cat_id")
         name = data.get("name", "Product")
         price = data.get("price", 0)
@@ -3250,6 +3252,7 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         context.user_data.pop("admin_state", None)
         context.user_data.pop("admin_data", None)
 
+        # desc is already HTML (may include <tg-emoji>); insert as-is under parse_mode=HTML
         await update.message.reply_html(
             f"✅ Product created!\n\n{emoji_for_html(emoji)} <b>{name}</b> — ${price:.2f}"
             + (f"\n📝 {desc}" if desc else ""),
@@ -3469,7 +3472,11 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     elif state == "prod_edit_value":
         prod_id = data.get("edit_prod_id")
         field = data.get("edit_prod_field")
-        if not text:
+        # Description may be premium-emoji-only (still non-empty text from Telegram)
+        if field != "desc" and not text:
+            await update.message.reply_html("❌ Cannot be empty.", reply_markup=_cancel_button("admin_products"))
+            return
+        if field == "desc" and not (update.message.text or "").strip():
             await update.message.reply_html("❌ Cannot be empty.", reply_markup=_cancel_button("admin_products"))
             return
 
@@ -3482,6 +3489,7 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             elif field == "emoji":
                 update_product(conn, prod_id, emoji=_extract_emoji(update.message))
             elif field == "desc":
+                # Premium emoji + bold/italic + text → correct HTML via text_html
                 update_product(conn, prod_id, description=_message_to_html(update.message))
             elif field == "cat":
                 update_product(conn, prod_id, category_id=int(text))
@@ -3493,8 +3501,16 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
         context.user_data.pop("admin_state", None)
         context.user_data.pop("admin_data", None)
+
+        # Preview saved description so admin can verify premium emoji rendered
+        preview = ""
+        if field == "desc":
+            saved = _message_to_html(update.message)
+            if saved:
+                preview = f"\n\n📝 {saved}"
+
         await update.message.reply_html(
-            "✅ Product updated!",
+            f"✅ Product updated!{preview}",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("📦 Back to Products", callback_data="admin_products"),
             ]]),
@@ -4038,106 +4054,35 @@ def _back_button(target: str) -> InlineKeyboardMarkup:
 def _message_to_html(message) -> str:
     """
     Convert a Telegram message (with entities) to safe HTML string.
-    Premium custom emoji entities become <tg-emoji> tags.
-    Bold/italic/code/underline/strikethrough/spoiler/links become HTML tags.
-    Unhandled entity types (mention, hashtag, etc.) keep original text.
-    Raw &, <, > are escaped to prevent BadRequest errors.
 
-    Telegram entity offsets/lengths are counted in UTF-16 code units, so we
-    convert the source text to UTF-16 and slice on that boundary.
+    Uses python-telegram-bot's built-in text_html / caption_html so that:
+      - Premium custom emoji → <tg-emoji emoji-id="...">…</tg-emoji>
+      - Bold/italic/code/etc. nest correctly with premium emoji
+      - Plain text is HTML-escaped (no broken tags when mixing emoji + text)
+
+    The previous hand-rolled converter broke offsets when premium emoji was
+    combined with other formatting or surrounding text.
     """
-    from html import escape as html_escape
-
-    text = message.text or message.caption or ""
-    if not text:
+    if not message:
         return ""
 
-    if not message.entities:
-        return html_escape(text, quote=False)
+    # Prefer official PTB conversion (supports nested entities + custom emoji).
+    try:
+        if message.text is not None:
+            html = message.text_html
+            if html is not None:
+                return html
+        if message.caption is not None:
+            html = message.caption_html
+            if html is not None:
+                return html
+    except Exception as e:
+        logger.warning(f"_message_to_html: text_html failed ({e}); falling back")
 
-    utf16 = text.encode("utf-16-le")
-
-    def slice_utf16(offset: int, length: int) -> str:
-        raw = utf16[offset * 2:(offset + length) * 2]
-        try:
-            return raw.decode("utf-16-le")
-        except UnicodeDecodeError:
-            return ""
-
-    # Sort by offset descending so replacements don't shift earlier indices.
-    entities = sorted(message.entities, key=lambda e: e.offset, reverse=True)
-
-    replacements = []  # list of (start_byte, end_byte, tag_string)
-    # Work in UTF-16 space so offsets align, then decode at the end.
-    result_utf16 = bytearray(utf16)
-
-    for entity in entities:
-        start_b = entity.offset * 2
-        end_b = (entity.offset + entity.length) * 2
-        segment = slice_utf16(entity.offset, entity.length)
-
-        tag = _entity_to_html(entity, segment, html_escape)
-        if tag is None:
-            continue  # keep original text for unhandled types
-
-        # Remember what to replace and with what
-        replacements.append((start_b, end_b, tag))
-
-    # Apply replacements in original order (reverse of processing order)
-    for start_b, end_b, tag in reversed(replacements):
-        result_utf16[start_b:end_b] = tag.encode("utf-16-le")
-
-    result = result_utf16.decode("utf-16-le")
-    return result
-
-
-def _entity_to_html(entity, segment: str, html_escape) -> str | None:
-    """Convert a single MessageEntity to its HTML tag string.
-    Returns None for unhandled types (keep original text)."""
-    if entity.type == "custom_emoji":
-        emoji_id = getattr(entity, "custom_emoji_id", "")
-        if not emoji_id:
-            return None  # keep original plain char
-        fallback = segment or "⭐"
-        return f'<tg-emoji emoji-id="{emoji_id}">{html_escape(fallback, quote=False)}</tg-emoji>'
-
-    elif entity.type == "bold":
-        return f"<b>{html_escape(segment, quote=False)}</b>"
-    elif entity.type == "italic":
-        return f"<i>{html_escape(segment, quote=False)}</i>"
-    elif entity.type == "underline":
-        return f"<u>{html_escape(segment, quote=False)}</u>"
-    elif entity.type == "strikethrough":
-        return f"<s>{html_escape(segment, quote=False)}</s>"
-    elif entity.type == "spoiler":
-        return f'<span class="tg-spoiler">{html_escape(segment, quote=False)}</span>'
-    elif entity.type == "blockquote":
-        return f"<blockquote>{html_escape(segment, quote=False)}</blockquote>"
-    elif entity.type == "code":
-        return f"<code>{html_escape(segment, quote=False)}</code>"
-    elif entity.type == "pre":
-        return f"<pre>{html_escape(segment, quote=False)}</pre>"
-
-    elif entity.type == "text_link":
-        url = getattr(entity, "url", "")
-        return f'<a href="{html_escape(url, quote=True)}">{html_escape(segment, quote=False)}</a>'
-    elif entity.type == "text_mention":
-        uid = getattr(entity, "user", {}).get("id", "") if hasattr(entity, "user") else ""
-        return f'<a href="tg://user?id={uid}">{html_escape(segment, quote=False)}</a>'
-    elif entity.type == "url":
-        return html_escape(segment, quote=False)
-    elif entity.type == "email":
-        return html_escape(segment, quote=False)
-    elif entity.type == "phone_number":
-        return html_escape(segment, quote=False)
-
-    # mention, hashtag, cashtag, bot_command, bank_card, etc.
-    # Keep original text, just HTML-escape it for safety
-    elif entity.type in ("mention", "hashtag", "cashtag", "bot_command"):
-        return html_escape(segment, quote=False)
-
-    # Unknown type — keep original text unchanged
-    return None
+    # Fallback: plain escape only (no entity formatting)
+    from html import escape as html_escape
+    text = message.text or message.caption or ""
+    return html_escape(text, quote=False) if text else ""
 
 
 def _extract_emoji(message) -> str:

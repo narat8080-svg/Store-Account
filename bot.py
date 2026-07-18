@@ -849,7 +849,9 @@ async def buy_detail(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     context.user_data["buy_data"] = {"prod_id": prod_id}
 
     max_line = "♾️ Unlimited" if is_unlimited else f"<b>{max_stock}</b>"
-    desc = prod.get("description", "")
+    desc = (prod.get("description") or "").strip()
+    # Description is stored as HTML (may include <tg-emoji>); do not wrap in <i>
+    # so nested tags / premium emoji stay valid for Telegram parse_mode=HTML.
     desc_text = f"\n{E('description')} {desc}" if desc else ""
     text = (
         f"{emoji_for_html(prod['emoji'])} <b>{prod['name']}</b>{desc_text}\n"
@@ -1615,24 +1617,33 @@ async def _handle_custom_order(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show user's order history as tappable buttons."""
+    """Show this user's purchase history only (never the product catalog)."""
     query = update.callback_query
     await query.answer()
 
     user = query.from_user
+    if not user:
+        return
+
     conn = get_db()
     try:
+        # Only real purchases for THIS telegram user
         orders = get_user_orders(conn, user.id, limit=10)
-        db_user = get_or_create_user(conn, user.id)
-        balance = db_user.get("balance", 0)
+        db_user = get_or_create_user(conn, user.id, user.username, user.first_name)
+        balance = float(db_user.get("balance", 0) or 0)
     finally:
         conn.close()
 
     if not orders:
         await query.edit_message_text(
-            f"{E('orders')} <b>My Orders</b>\n\nNo purchases yet.\nBrowse {E('product')} Products!",
+            f"{E('orders')} <b>My Orders</b>\n\n"
+            f"No purchases yet.\n"
+            f"Buy something from {E('product')} <b>Shop Now</b> — your orders will show up here.",
             parse_mode="HTML",
-            reply_markup=_back_button(),
+            reply_markup=InlineKeyboardMarkup([
+                [_make_smart_button("Shop Now", "menu_product", "menu_product")],
+                [_make_smart_button("Back", "menu_start", "back")],
+            ]),
         )
         return
 
@@ -1644,11 +1655,19 @@ async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     buttons = []
     for o in orders:
+        # Extra safety: never list an order that is not this user's
+        try:
+            if int(o.get("user_id", -1)) != int(user.id):
+                continue
+        except (TypeError, ValueError):
+            continue
+
         db_emoji = o.get("product_emoji", "📦")
         emoji = emoji_for_button(db_emoji)
         name = o.get("product_name") or f"Product #{o.get('product_id', '?')}"
         date = (o.get("created_at", "")[:10] or "?")
-        btn_text = f"{emoji} {name} — ${o['amount']:.2f} | {date}"
+        amount = float(o.get("amount") or 0)
+        btn_text = f"{emoji} {name} — ${amount:.2f} | {date}"
         pid = emoji_premium_id(db_emoji)
         icon_id = str(pid) if pid else None
         if pid:
@@ -1656,6 +1675,18 @@ async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if btn_text.startswith(plain):
                 btn_text = btn_text[len(plain):].strip()
         buttons.append([_safe_button(btn_text, f"order_detail_{o['id']}", icon_id)])
+
+    if not buttons:
+        # All rows filtered out → treat as empty
+        await query.edit_message_text(
+            f"{E('orders')} <b>My Orders</b>\n\nNo purchases yet.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [_make_smart_button("Shop Now", "menu_product", "menu_product")],
+                [_make_smart_button("Back", "menu_start", "back")],
+            ]),
+        )
+        return
 
     buttons.append([_make_smart_button("Back", "menu_start", "back")])
 
@@ -1665,15 +1696,31 @@ async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def order_detail(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show order details and send account file."""
+    """Show order details and send account file (only if this user owns the order)."""
     query = update.callback_query
     await query.answer()
 
-    order_id = int(query.data.replace("order_detail_", ""))
+    user = query.from_user
+    if not user:
+        return
+
+    try:
+        order_id = int(query.data.replace("order_detail_", ""))
+    except (TypeError, ValueError):
+        await query.edit_message_text("Order not found.", reply_markup=_back_button("menu_myorder"))
+        return
+
     conn = get_db()
     try:
-        orders = get_user_orders(conn, query.from_user.id, limit=50)
-        order = next((o for o in orders if o["id"] == order_id), None)
+        orders = get_user_orders(conn, user.id, limit=50)
+        order = next((o for o in orders if int(o.get("id", -1)) == order_id), None)
+        # Ownership already enforced in get_user_orders; re-check here
+        if order is not None:
+            try:
+                if int(order.get("user_id", -1)) != int(user.id):
+                    order = None
+            except (TypeError, ValueError):
+                order = None
     finally:
         conn.close()
 
@@ -2147,8 +2194,9 @@ async def _send_pay_options(chat_id: int, context: ContextTypes.DEFAULT_TYPE,
         )
 
     total = unit_price * qty
-    desc = prod.get("description", "")
-    desc_text = f"\n{E('description')} <i>{desc}</i>" if desc else ""
+    desc = (prod.get("description") or "").strip()
+    # Description already HTML (premium emoji etc.) — insert as-is, no extra <i> wrap
+    desc_text = f"\n{E('description')} {desc}" if desc else ""
 
     text = (
         f"{emoji_for_html(prod['emoji'])} <b>{prod['name']}</b>{desc_text}\n\n"
