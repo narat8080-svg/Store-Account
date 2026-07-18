@@ -2041,17 +2041,13 @@ async def custom_section_detail(update: Update, context: ContextTypes.DEFAULT_TY
     )
 
 
-async def custom_emoji_detail(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show current emoji only (new premium). Update / reset / back."""
-    query = update.callback_query
-    await query.answer()
-
+async def _render_emoji_detail(query, context: ContextTypes.DEFAULT_TYPE, key: str) -> None:
+    """Render emoji detail keyboard: Set (no premium) or Update (premium set)."""
     # Leaving set-emoji prompt — clear waiting state so stray messages are ignored
     if context.user_data.get("admin_state") == "custom_setval":
         context.user_data.pop("admin_state", None)
         context.user_data.pop("admin_data", None)
 
-    key = query.data.replace("custom_emoji_", "")
     current = eget(key)  # HTML <tg-emoji> for premium, plain otherwise
     label = LABELS.get(key, key)
     premium_id = get_premium_id(key)
@@ -2061,31 +2057,44 @@ async def custom_emoji_detail(update: Update, context: ContextTypes.DEFAULT_TYPE
         text = (
             f"🎨 <b>{label}</b>\n\n"
             f"Current: {current}\n"
-            f"<i>Premium emoji is active on buttons.</i>\n\n"
-            f"Tap <b>Update Emoji</b> to replace with a new premium or normal emoji.\n"
-            f"Or <b>Reset to Default</b> to restore the default unicode."
+            f"Status: <b>Premium emoji is set</b>\n\n"
+            f"• <b>Update</b> — replace the premium emoji with a new one\n"
+            f"• <b>Reset to Default</b> — restore default unicode\n\n"
+            f"<i>Only the new emoji will show after update.</i>"
         )
-        action_btn = InlineKeyboardButton(
-            "✏️ Update Emoji", callback_data=f"custom_update_{key}"
-        )
+        # Premium already set → Update only
+        action_row = [
+            InlineKeyboardButton("✏️ Update", callback_data=f"custom_update_{key}"),
+        ]
     else:
         text = (
             f"🎨 <b>{label}</b>\n\n"
-            f"Current: {current}\n\n"
-            f"Tap <b>Set Emoji</b> and send a premium or normal emoji.\n"
-            f"<i>Only the new emoji will show — old one is replaced.</i>"
+            f"Current: {current}\n"
+            f"Status: <b>No premium emoji yet</b>\n\n"
+            f"• <b>Set</b> — set a premium (or normal) emoji\n"
+            f"• <b>Reset to Default</b> — restore default unicode\n\n"
+            f"<i>Send a premium emoji from Telegram's panel for animated icons.</i>"
         )
-        action_btn = InlineKeyboardButton(
-            "✏️ Set Emoji", callback_data=f"custom_setval_{key}"
-        )
+        # Not set yet → Set only
+        action_row = [
+            InlineKeyboardButton("✏️ Set", callback_data=f"custom_setval_{key}"),
+        ]
 
     keyboard = [
-        [action_btn],
+        action_row,
         [InlineKeyboardButton("🔄 Reset to Default", callback_data=f"custom_reset_{key}")],
         [InlineKeyboardButton("🔙 Back", callback_data=f"custom_sec_{_find_section(key)}")],
     ]
 
     await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def custom_emoji_detail(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show current emoji. Set (no premium yet) or Update (premium already set)."""
+    query = update.callback_query
+    await query.answer()
+    key = query.data.replace("custom_emoji_", "")
+    await _render_emoji_detail(query, context, key)
 
 
 def _find_section(key: str) -> str:
@@ -2096,23 +2105,41 @@ def _find_section(key: str) -> str:
 
 
 async def custom_set_value_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Prompt admin to send a new emoji (plain unicode or premium custom emoji)."""
+    """Prompt admin to Set (new) or Update (existing premium) emoji."""
     query = update.callback_query
-    await query.answer()
 
     raw = query.data or ""
     is_update = raw.startswith("custom_update_")
     key = raw.replace("custom_setval_", "").replace("custom_update_", "")
+    premium_id = get_premium_id(key)
+
+    # Update is only for keys that already have premium set
+    if is_update and not premium_id:
+        await query.answer("No premium emoji set yet. Use Set first.", show_alert=True)
+        await _render_emoji_detail(query, context, key)
+        return
+
+    # Set is for first-time / no premium — if premium already exists, guide to Update
+    if not is_update and premium_id:
+        await query.answer("Premium already set. Use Update to change it.", show_alert=True)
+        await _render_emoji_detail(query, context, key)
+        return
+
+    await query.answer()
     context.user_data["admin_state"] = "custom_setval"
     context.user_data["admin_data"] = {"emoji_key": key}
 
     label = LABELS.get(key, key)
-    premium_id = get_premium_id(key)
-    title = "Update" if (is_update or premium_id) else "Set"
+    title = "Update" if is_update else "Set"
+    action_hint = (
+        "Send a <b>new</b> premium emoji to replace the current one."
+        if is_update
+        else "Send a premium emoji to <b>set</b> it for the first time."
+    )
 
     await query.edit_message_text(
-        f"✏️ <b>{title} emoji for:</b> {label}\n\n"
-        f"<b>Send the new emoji now</b> (it will replace the old one completely):\n\n"
+        f"✏️ <b>{title} premium emoji for:</b> {label}\n\n"
+        f"{action_hint}\n\n"
         f"<b>Premium animated emoji:</b>\n"
         f"  • Open Telegram emoji panel\n"
         f"  • Tap a premium / animated emoji\n"
