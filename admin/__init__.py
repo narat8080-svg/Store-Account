@@ -1872,16 +1872,16 @@ async def admin_customize(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await query.answer()
 
     keyboard = [
-        [_styled_btn("🎨 Set Emoji", "custom_set_emoji", "admin_dashboard")],
-        [_styled_btn("🔄 Reset All Emojis", "custom_reset_all", "admin_close")],
-        [_styled_btn("🔙 Back", "admin_panel", "admin_close")],
+        [InlineKeyboardButton("🎨 Set Emoji", callback_data="custom_set_emoji")],
+        [InlineKeyboardButton("🔄 Reset All Emojis", callback_data="custom_reset_all")],
+        [InlineKeyboardButton("🔙 Back", callback_data="admin_panel")],
     ]
 
     await query.edit_message_text(
         "🎨 <b>Customize Bot</b>\n\n"
         "Change emojis used throughout the bot.\n"
         "Tap <b>Set Emoji</b> to pick a section and customize its emoji.\n\n"
-        "<i>Send a premium animated emoji from Telegram's sticker panel to use custom emojis on buttons.</i>",
+        "<i>Send a premium animated emoji from Telegram's emoji panel to use custom emojis on buttons.</i>",
         parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -1924,13 +1924,18 @@ async def custom_reset_all_confirm(update: Update, context: ContextTypes.DEFAULT
     await query.edit_message_text(
         "✅ All emojis reset to defaults!",
         reply_markup=InlineKeyboardMarkup([[
-            _styled_btn("🔙 Back", "admin_customize", "admin_close")
+            InlineKeyboardButton("🔙 Back", callback_data="admin_customize")
         ]])
     )
 
 
+def _plain_btn(text: str, callback_data: str) -> InlineKeyboardButton:
+    """Plain picker button — no premium icon, no color style (readable labels)."""
+    return InlineKeyboardButton(text=(text or "•")[:64], callback_data=callback_data)
+
+
 async def custom_sections(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show all sections in a grid."""
+    """Show all sections as plain text buttons (no shared premium/style)."""
     query = update.callback_query
     await query.answer()
 
@@ -1944,23 +1949,27 @@ async def custom_sections(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     buttons = []
     row = []
     for name in section_names:
-        row.append(_styled_btn(name, f"custom_sec_{name}", "admin_dashboard"))
+        # Do NOT use _styled_btn(..., "admin_dashboard") — that made every
+        # section share Dashboard's premium icon + button color.
+        row.append(_plain_btn(name, f"custom_sec_{name}"))
         if len(row) == 2:
             buttons.append(row)
             row = []
     if row:
         buttons.append(row)
 
-    buttons.append([_styled_btn("🔙 Back", "admin_customize", "admin_close")])
+    buttons.append([_plain_btn("🔙 Back", "admin_customize")])
 
     await query.edit_message_text(
-        "🎨 <b>Set Emoji</b>\n\nSelect a section to customize its emojis:",
+        "🎨 <b>Set Emoji</b>\n\n"
+        "Select a section to customize its emojis:\n"
+        "<i>Section buttons are plain text (no premium icon / color).</i>",
         parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons)
     )
 
 
 async def custom_section_detail(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show all emoji keys in a section as 3-per-row buttons."""
+    """List emoji keys with plain labels — no premium icon / color on picker."""
     query = update.callback_query
     await query.answer()
 
@@ -1973,44 +1982,30 @@ async def custom_section_detail(update: Update, context: ContextTypes.DEFAULT_TY
         keys = SECTIONS.get(section_name, [])
 
     if not keys:
-        await query.answer("No emojis in this section")
+        await query.answer("No emojis in this section", show_alert=True)
         return
 
     buttons = []
     row = []
     for key in keys:
-        premium_id = get_premium_id(key)
         label = LABELS.get(key, key)
-        if premium_id:
-            # Premium only — no old unicode next to the new icon
-            btn_text = strip_leading_emoji(label)[:18] or label[:18]
-            btn_kwargs = {
-                "text": btn_text,
-                "callback_data": f"custom_emoji_{key}",
-                "icon_custom_emoji_id": str(premium_id),
-            }
-        else:
-            current = get_plain(key)
-            btn_kwargs = {
-                "text": f"{current} {label[:12]}".strip(),
-                "callback_data": f"custom_emoji_{key}",
-            }
-        try:
-            row.append(InlineKeyboardButton(**btn_kwargs))
-        except TypeError:
-            row.append(InlineKeyboardButton(
-                text=btn_kwargs["text"], callback_data=btn_kwargs["callback_data"]
-            ))
-        if len(row) == 3:
+        plain = get_plain(key)
+        # Plain unicode + name only. Premium preview is on the detail screen.
+        mark = " ★" if get_premium_id(key) else ""
+        btn_text = f"{plain} {label[:16]}{mark}".strip()
+        row.append(_plain_btn(btn_text, f"custom_emoji_{key}"))
+        if len(row) == 2:
             buttons.append(row)
             row = []
     if row:
         buttons.append(row)
 
-    buttons.append([_styled_btn("🔙 Back", "custom_set_emoji", "admin_close")])
+    buttons.append([_plain_btn("🔙 Back", "custom_set_emoji")])
 
     await query.edit_message_text(
-        f"🎨 <b>{section_name}</b>\n\nTap an emoji to customize:",
+        f"🎨 <b>{section_name}</b>\n\n"
+        f"Tap an item to customize.\n"
+        f"<i>★ = premium already set (opens with full preview).</i>",
         parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons)
     )
 
@@ -2081,7 +2076,7 @@ async def custom_set_value_start(update: Update, context: ContextTypes.DEFAULT_T
         f"<i>Send ONLY the emoji — no extra text.</i>",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([[
-            _styled_btn("❌ Cancel", f"custom_emoji_{key}", "admin_close")
+            InlineKeyboardButton("❌ Cancel", callback_data=f"custom_emoji_{key}")
         ]])
     )
 
