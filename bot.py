@@ -111,6 +111,7 @@ from admin import (
     custom_emoji_detail,
     custom_set_value_start,
     custom_reset_key,
+    custom_reset_key_confirm,
     handle_admin_text,
     # New admin handlers
     admin_broadcast,
@@ -2110,6 +2111,8 @@ async def _route_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, da
         await custom_set_value_start(update, context)
     elif data.startswith("custom_update_"):
         await custom_set_value_start(update, context)
+    elif data.startswith("custom_reset_confirm_"):
+        await custom_reset_key_confirm(update, context)
     elif data.startswith("custom_reset_"):
         await custom_reset_key(update, context)
 

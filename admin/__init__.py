@@ -1871,6 +1871,11 @@ async def admin_customize(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     query = update.callback_query
     await query.answer()
 
+    # Cancel paths land here — drop any in-progress set-emoji wait
+    if context.user_data.get("admin_state") == "custom_setval":
+        context.user_data.pop("admin_state", None)
+        context.user_data.pop("admin_data", None)
+
     keyboard = [
         [InlineKeyboardButton("🎨 Set Emoji", callback_data="custom_set_emoji")],
         [InlineKeyboardButton("🔄 Reset All Emojis", callback_data="custom_reset_all")],
@@ -1899,7 +1904,7 @@ async def custom_reset_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([
             [
-                InlineKeyboardButton("✅ Confirm Reset", callback_data="custom_reset_all_confirm"),
+                InlineKeyboardButton("✅ Confirm", callback_data="custom_reset_all_confirm"),
                 InlineKeyboardButton("❌ Cancel", callback_data="admin_customize"),
             ]
         ])
@@ -2037,9 +2042,14 @@ async def custom_section_detail(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def custom_emoji_detail(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show current emoji only (new premium). Set / reset / back."""
+    """Show current emoji only (new premium). Update / reset / back."""
     query = update.callback_query
     await query.answer()
+
+    # Leaving set-emoji prompt — clear waiting state so stray messages are ignored
+    if context.user_data.get("admin_state") == "custom_setval":
+        context.user_data.pop("admin_state", None)
+        context.user_data.pop("admin_data", None)
 
     key = query.data.replace("custom_emoji_", "")
     current = eget(key)  # HTML <tg-emoji> for premium, plain otherwise
@@ -2052,8 +2062,11 @@ async def custom_emoji_detail(update: Update, context: ContextTypes.DEFAULT_TYPE
             f"🎨 <b>{label}</b>\n\n"
             f"Current: {current}\n"
             f"<i>Premium emoji is active on buttons.</i>\n\n"
-            f"Send a new premium emoji via <b>Set Emoji</b> to replace it.\n"
-            f"Or <b>Reset</b> to the default unicode."
+            f"Tap <b>Update Emoji</b> to replace with a new premium or normal emoji.\n"
+            f"Or <b>Reset to Default</b> to restore the default unicode."
+        )
+        action_btn = InlineKeyboardButton(
+            "✏️ Update Emoji", callback_data=f"custom_update_{key}"
         )
     else:
         text = (
@@ -2062,9 +2075,12 @@ async def custom_emoji_detail(update: Update, context: ContextTypes.DEFAULT_TYPE
             f"Tap <b>Set Emoji</b> and send a premium or normal emoji.\n"
             f"<i>Only the new emoji will show — old one is replaced.</i>"
         )
+        action_btn = InlineKeyboardButton(
+            "✏️ Set Emoji", callback_data=f"custom_setval_{key}"
+        )
 
     keyboard = [
-        [InlineKeyboardButton("✏️ Set Emoji", callback_data=f"custom_setval_{key}")],
+        [action_btn],
         [InlineKeyboardButton("🔄 Reset to Default", callback_data=f"custom_reset_{key}")],
         [InlineKeyboardButton("🔙 Back", callback_data=f"custom_sec_{_find_section(key)}")],
     ]
@@ -2084,14 +2100,18 @@ async def custom_set_value_start(update: Update, context: ContextTypes.DEFAULT_T
     query = update.callback_query
     await query.answer()
 
-    key = query.data.replace("custom_setval_", "").replace("custom_update_", "")
+    raw = query.data or ""
+    is_update = raw.startswith("custom_update_")
+    key = raw.replace("custom_setval_", "").replace("custom_update_", "")
     context.user_data["admin_state"] = "custom_setval"
     context.user_data["admin_data"] = {"emoji_key": key}
 
     label = LABELS.get(key, key)
+    premium_id = get_premium_id(key)
+    title = "Update" if (is_update or premium_id) else "Set"
 
     await query.edit_message_text(
-        f"✏️ <b>Set emoji for:</b> {label}\n\n"
+        f"✏️ <b>{title} emoji for:</b> {label}\n\n"
         f"<b>Send the new emoji now</b> (it will replace the old one completely):\n\n"
         f"<b>Premium animated emoji:</b>\n"
         f"  • Open Telegram emoji panel\n"
@@ -2108,11 +2128,54 @@ async def custom_set_value_start(update: Update, context: ContextTypes.DEFAULT_T
 
 
 async def custom_reset_key(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Reset an emoji key to its default and clear premium icon from button config."""
+    """Ask for confirmation before resetting one emoji to default."""
     query = update.callback_query
     await query.answer()
 
     key = query.data.replace("custom_reset_", "")
+    # Avoid treating reset-all paths as a single key (routed separately in bot.py)
+    if key in ("all", "all_confirm") or key.startswith("confirm_"):
+        return
+
+    label = LABELS.get(key, key)
+    current = eget(key)
+    default_val = DEFAULTS.get(key, "❓")
+    if isinstance(default_val, dict) and "p" in default_val:
+        default_display = (
+            f'<tg-emoji emoji-id="{default_val["p"]}">'
+            f'{default_val.get("f") or "⭐"}</tg-emoji>'
+        )
+    else:
+        default_display = str(default_val)
+
+    await query.edit_message_text(
+        f"⚠️ <b>Reset to Default?</b>\n\n"
+        f"<b>{label}</b>\n"
+        f"Current: {current}\n"
+        f"Default: {default_display}\n\n"
+        f"This will restore the default emoji and clear any premium icon.\n"
+        f"This action <b>cannot be undone</b>.\n\n"
+        f"<i>Are you sure?</i>",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "✅ Confirm", callback_data=f"custom_reset_confirm_{key}"
+                ),
+                InlineKeyboardButton(
+                    "❌ Cancel", callback_data=f"custom_emoji_{key}"
+                ),
+            ]
+        ]),
+    )
+
+
+async def custom_reset_key_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Execute single-emoji reset after confirmation."""
+    query = update.callback_query
+    await query.answer()
+
+    key = query.data.replace("custom_reset_confirm_", "")
     reset(key)
     # Clear premium icon for this key on all button configs
     try:
@@ -4044,9 +4107,10 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             except TypeError:
                 pass
 
+        kind = "premium emoji" if custom_emoji_id else "emoji"
         await update.message.reply_html(
             f"✅ <b>{label}</b> updated\n\n"
-            f"New emoji: {display}\n"
+            f"New {kind}: {display}\n"
             f"<i>Old emoji replaced — only this one is used now.</i>",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("🎨 Customize", callback_data="admin_customize"),
@@ -4403,28 +4467,41 @@ def _extract_emoji_value(message) -> tuple:
     Uses MessageEntity.CUSTOM_EMOJI / "custom_emoji" (works with PTB enums).
     """
     text = (message.text or message.caption or "").strip()
-    entities = message.entities or message.caption_entities or []
+    entities = list(message.entities or []) + list(message.caption_entities or [])
+
+    try:
+        from telegram import MessageEntity
+        custom_emoji_type = getattr(MessageEntity, "CUSTOM_EMOJI", "custom_emoji")
+    except Exception:
+        custom_emoji_type = "custom_emoji"
 
     for entity in entities:
         etype = getattr(entity, "type", None)
         etype_str = str(etype) if etype is not None else ""
-        if etype_str in ("custom_emoji", "MessageEntityType.CUSTOM_EMOJI") or (
-            getattr(etype, "value", None) == "custom_emoji"
-        ) or etype == "custom_emoji":
-            emoji_id = getattr(entity, "custom_emoji_id", None) or ""
-            if not emoji_id:
-                continue
-            fallback = "⭐"
-            if text:
-                try:
-                    utf16 = text.encode("utf-16-le")
-                    seg = utf16[entity.offset * 2:(entity.offset + entity.length) * 2]
-                    decoded = seg.decode("utf-16-le", errors="ignore").strip()
-                    if decoded:
-                        fallback = decoded
-                except Exception:
-                    pass
-            return {"p": str(emoji_id), "f": fallback}, str(emoji_id)
+        etype_val = getattr(etype, "value", None)
+        is_custom = (
+            etype == custom_emoji_type
+            or etype == "custom_emoji"
+            or etype_str in ("custom_emoji", "MessageEntityType.CUSTOM_EMOJI")
+            or etype_val == "custom_emoji"
+            or "custom_emoji" in etype_str.lower()
+        )
+        if not is_custom:
+            continue
+        emoji_id = getattr(entity, "custom_emoji_id", None) or ""
+        if not emoji_id:
+            continue
+        fallback = "⭐"
+        if text:
+            try:
+                utf16 = text.encode("utf-16-le")
+                seg = utf16[entity.offset * 2:(entity.offset + entity.length) * 2]
+                decoded = seg.decode("utf-16-le", errors="ignore").strip()
+                if decoded:
+                    fallback = decoded
+            except Exception:
+                pass
+        return {"p": str(emoji_id), "f": fallback or "⭐"}, str(emoji_id)
 
     # Plain unicode — first grapheme cluster-ish (up to 8 code units for ZWJ)
     if text:
