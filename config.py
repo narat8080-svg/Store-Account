@@ -52,9 +52,9 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 # Orders (product purchased) → order alert group
-ORDER_GROUP_ID = _env_int("ORDER_GROUP_ID", -1004352483292)
+ORDER_GROUP_ID = _env_int("ORDER_GROUP_ID", -1003729530722)
 # Deposits / payments completed → payment alert group
-PAYMENT_GROUP_ID = _env_int("PAYMENT_GROUP_ID", -1003729530722)
+PAYMENT_GROUP_ID = _env_int("PAYMENT_GROUP_ID", -1004352483292)
 # New users joining the bot
 NEW_USER_GROUP_ID = _env_int("NEW_USER_GROUP_ID", -1004490564374)
 

@@ -190,7 +190,7 @@ async def _notify_payment_group(
     username: str | None = None,
     first_name: str | None = None,
 ) -> None:
-    """Alert deposit/payment success → PAYMENT_GROUP_ID (-1003729530722)."""
+    """Alert deposit/payment success → PAYMENT_GROUP_ID (-1004352483292)."""
     try:
         from config import PAYMENT_GROUP_ID
         if not PAYMENT_GROUP_ID:
@@ -243,7 +243,7 @@ async def _notify_order_group(
     pay_method: str = "Wallet",
     user_id: int | None = None,
 ) -> None:
-    """Alert new product order → ORDER_GROUP_ID (-1004352483292)."""
+    """Alert new product order → ORDER_GROUP_ID (-1003729530722)."""
     try:
         from config import ORDER_GROUP_ID
         if not ORDER_GROUP_ID:
