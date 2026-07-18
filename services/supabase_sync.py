@@ -129,6 +129,123 @@ def backup_to_bytesio() -> io.BytesIO:
 
 
 # ===========================================================================
+# AUTO BACKUP — store snapshots in Supabase bot_settings
+# ===========================================================================
+AUTO_BACKUP_LATEST_KEY = "auto_backup_latest"
+AUTO_BACKUP_META_KEY = "auto_backup_meta"
+AUTO_BACKUP_HISTORY_KEY = "auto_backup_history"  # list of last 3 meta + data keys
+AUTO_BACKUP_KEEP = 3
+
+
+def save_auto_backup_to_supabase() -> dict:
+    """
+    Export all tables and store the latest backup in Supabase bot_settings.
+    Keeps the last AUTO_BACKUP_KEEP snapshots (rotated).
+    Returns meta dict or raises on hard failure.
+    """
+    result = create_backup()
+    if not result["success"]:
+        raise RuntimeError("Auto-backup failed: " + str(result.get("error", "Unknown")))
+
+    supabase = get_supabase()
+    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    data_key = f"auto_backup_data_{stamp}"
+
+    payload = {
+        "timestamp": now,
+        "stamp": stamp,
+        "table_count": result["table_count"],
+        "total_rows": result["total_rows"],
+        "tables": {t: len(result["data"].get(t) or []) for t in BACKUP_TABLES},
+        "data_key": data_key,
+    }
+
+    # Store full data under unique key
+    data_json = json.dumps(result["data"], ensure_ascii=False, default=str)
+    supabase.table("bot_settings").upsert(
+        {"key": data_key, "value": data_json},
+        on_conflict="key",
+    ).execute()
+
+    # Latest pointer (full data also under fixed key for quick restore)
+    supabase.table("bot_settings").upsert(
+        {"key": AUTO_BACKUP_LATEST_KEY, "value": data_json},
+        on_conflict="key",
+    ).execute()
+    supabase.table("bot_settings").upsert(
+        {"key": AUTO_BACKUP_META_KEY, "value": json.dumps(payload, ensure_ascii=False)},
+        on_conflict="key",
+    ).execute()
+
+    # Rotate history (keep last N data keys)
+    history = []
+    try:
+        r = supabase.table("bot_settings").select("value").eq("key", AUTO_BACKUP_HISTORY_KEY).execute()
+        if r.data:
+            history = json.loads(r.data[0]["value"]) or []
+    except Exception:
+        history = []
+
+    history.insert(0, payload)
+    # Drop old entries beyond keep limit
+    to_delete = history[AUTO_BACKUP_KEEP:]
+    history = history[:AUTO_BACKUP_KEEP]
+    for old in to_delete:
+        old_key = old.get("data_key")
+        if old_key and old_key != data_key:
+            try:
+                supabase.table("bot_settings").delete().eq("key", old_key).execute()
+            except Exception as e:
+                logger.warning(f"Auto-backup: could not delete old key {old_key}: {e}")
+
+    supabase.table("bot_settings").upsert(
+        {"key": AUTO_BACKUP_HISTORY_KEY, "value": json.dumps(history, ensure_ascii=False)},
+        on_conflict="key",
+    ).execute()
+
+    logger.info(f"Auto-backup saved to Supabase: {payload['total_rows']} rows @ {now}")
+    return payload
+
+
+def get_auto_backup_meta() -> dict | None:
+    """Return latest auto-backup meta from Supabase, or None."""
+    try:
+        supabase = get_supabase()
+        r = supabase.table("bot_settings").select("value").eq("key", AUTO_BACKUP_META_KEY).execute()
+        if r.data:
+            return json.loads(r.data[0]["value"])
+    except Exception as e:
+        logger.warning(f"get_auto_backup_meta failed: {e}")
+    return None
+
+
+def get_auto_backup_history() -> list:
+    """Return list of recent auto-backup meta entries."""
+    try:
+        supabase = get_supabase()
+        r = supabase.table("bot_settings").select("value").eq("key", AUTO_BACKUP_HISTORY_KEY).execute()
+        if r.data:
+            return json.loads(r.data[0]["value"]) or []
+    except Exception as e:
+        logger.warning(f"get_auto_backup_history failed: {e}")
+    return []
+
+
+def restore_latest_auto_backup() -> dict:
+    """Restore database from the latest auto-backup stored in Supabase."""
+    supabase = get_supabase()
+    r = supabase.table("bot_settings").select("value").eq("key", AUTO_BACKUP_LATEST_KEY).execute()
+    if not r.data:
+        return {"success": False, "error": "No auto-backup found in Supabase"}
+    try:
+        backup_dict = json.loads(r.data[0]["value"])
+    except Exception as e:
+        return {"success": False, "error": f"Invalid auto-backup data: {e}"}
+    return restore_from_backup(backup_dict)
+
+
+# ===========================================================================
 # RESTORE — Import from JSON backup back to Supabase
 # ===========================================================================
 def restore_from_backup(backup_dict: dict) -> dict:

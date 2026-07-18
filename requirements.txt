@@ -1,4 +1,4 @@
-python-telegram-bot[webhooks]==22.7
+python-telegram-bot[webhooks,job-queue]==22.7
 aiohttp==3.13.4
 python-dotenv==1.0.1
 qrcode[pil]>=7.4

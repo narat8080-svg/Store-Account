@@ -30,7 +30,8 @@ from config import ADMIN_ID
 from utils.emoji_manager import (get_all, get as eget, get_plain, get_premium_id,
                            set_emoji, reset, SECTIONS, LABELS, DEFAULTS,
                            emoji_for_html, emoji_for_button, emoji_premium_id,
-                           parse_db_emoji, load_button_config, get_button_style)
+                           parse_db_emoji, load_button_config, get_button_style,
+                           strip_leading_emoji)
 from services.database import (
     add_category,
     add_product,
@@ -81,43 +82,40 @@ logger = logging.getLogger(__name__)
 
 
 def _cat_btn(label: str, callback_data: str, db_emoji) -> InlineKeyboardButton:
-    """Button with premium emoji icon — strips plain emoji from text when icon is used."""
+    """Button with premium emoji icon — only new premium icon, no old unicode."""
     pid = emoji_premium_id(db_emoji)
     icon_id = str(pid) if pid else None
     if pid:
-        plain, _ = parse_db_emoji(db_emoji)
-        if label.startswith(plain):
-            label = label[len(plain):].strip()
-    # PTB-version-safe button creation
-    kwargs = {"text": label, "callback_data": callback_data}
+        label = strip_leading_emoji(label) or label
+    kwargs = {"text": label or "•", "callback_data": callback_data}
     if icon_id:
         kwargs["icon_custom_emoji_id"] = icon_id
     try:
         return InlineKeyboardButton(**kwargs)
     except TypeError:
-        return InlineKeyboardButton(text=label, callback_data=callback_data)
+        return InlineKeyboardButton(text=label or "•", callback_data=callback_data)
 
 
 def _styled_btn(label: str, callback_data: str, key: str) -> InlineKeyboardButton:
     """
     Create a styled admin button using button_config.json for colors
     and emoji_config.json for premium emoji icons.
-    When a premium icon is set, strips the plain emoji from the label.
+
+    When a premium icon is set, ALL leading unicode emoji are stripped from the
+    label so Telegram shows only the new premium icon (never old + new together).
     """
     btn_cfg = load_button_config()
     cfg = btn_cfg.get(key, {}) if btn_cfg else {}
     style = cfg.get("style") if isinstance(cfg, dict) else None
 
-    # Check for premium emoji in emoji_config
+    # Premium icon from emoji_config (single source of truth)
     premium_id = get_premium_id(key)
 
     if premium_id:
-        # Strip the plain emoji from label when using premium icon
-        plain = get_plain(key)
-        if plain and label.startswith(plain):
-            label = label[len(plain):].strip()
+        # Drop hardcoded / old unicode from label — premium icon replaces it
+        label = strip_leading_emoji(label) or label
 
-    kwargs = {"text": label, "callback_data": callback_data}
+    kwargs = {"text": label or "•", "callback_data": callback_data}
     if premium_id:
         kwargs["icon_custom_emoji_id"] = str(premium_id)
     if style and style != "none":
@@ -125,7 +123,8 @@ def _styled_btn(label: str, callback_data: str, key: str) -> InlineKeyboardButto
     try:
         return InlineKeyboardButton(**kwargs)
     except TypeError:
-        return InlineKeyboardButton(text=label, callback_data=callback_data)
+        # Old PTB without icon_custom_emoji_id — keep plain label only
+        return InlineKeyboardButton(text=label or "•", callback_data=callback_data)
 
 
 async def _send_restock_notify(context, prod: dict, stock: int, chat_id: int) -> None:
@@ -1948,14 +1947,28 @@ async def custom_section_detail(update: Update, context: ContextTypes.DEFAULT_TY
     buttons = []
     row = []
     for key in keys:
-        current = get_plain(key)  # plain fallback for button display
         premium_id = get_premium_id(key)
         label = LABELS.get(key, key)
-        btn_kwargs = {"text": f"{current} {label[:12]}", "callback_data": f"custom_emoji_{key}"}
         if premium_id:
-            btn_kwargs["icon_custom_emoji_id"] = premium_id
-            btn_kwargs["text"] = label[:14]  # shorter text since icon takes space
-        row.append(InlineKeyboardButton(**btn_kwargs))
+            # Premium only — no old unicode next to the new icon
+            btn_text = strip_leading_emoji(label)[:18] or label[:18]
+            btn_kwargs = {
+                "text": btn_text,
+                "callback_data": f"custom_emoji_{key}",
+                "icon_custom_emoji_id": str(premium_id),
+            }
+        else:
+            current = get_plain(key)
+            btn_kwargs = {
+                "text": f"{current} {label[:12]}".strip(),
+                "callback_data": f"custom_emoji_{key}",
+            }
+        try:
+            row.append(InlineKeyboardButton(**btn_kwargs))
+        except TypeError:
+            row.append(InlineKeyboardButton(
+                text=btn_kwargs["text"], callback_data=btn_kwargs["callback_data"]
+            ))
         if len(row) == 3:
             buttons.append(row)
             row = []
@@ -1971,33 +1984,34 @@ async def custom_section_detail(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def custom_emoji_detail(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show current emoji with set/update/reset/back buttons. Premium emojis render natively."""
+    """Show current emoji only (new premium). Set / reset / back."""
     query = update.callback_query
     await query.answer()
 
     key = query.data.replace("custom_emoji_", "")
-    current = eget(key)  # HTML tag for premium (renders in message), plain char otherwise
-    current_raw = get_all().get(key, DEFAULTS.get(key, "❓"))
-    default = DEFAULTS.get(key, "❓")
+    current = eget(key)  # HTML <tg-emoji> for premium, plain otherwise
     label = LABELS.get(key, key)
     premium_id = get_premium_id(key)
 
-    # Show premium emoji ID if applicable
-    premium_info = ""
+    # Show only the CURRENT emoji (never old default + new side by side)
     if premium_id:
-        premium_info = f"\nPremium ID: <code>{premium_id}</code>"
-
-    text = (
-        f"🎨 <b>{label}</b>\n\n"
-        f"Current: {current}{premium_info}\n"
-        f"Default: {default}\n\n"
-        f"Tap <b>Set Emoji</b> to type a new one.\n"
-        f"Tap <b>Update Emoji</b> to re-send a premium emoji."
-    )
+        text = (
+            f"🎨 <b>{label}</b>\n\n"
+            f"Current: {current}\n"
+            f"<i>Premium emoji is active on buttons.</i>\n\n"
+            f"Send a new premium emoji via <b>Set Emoji</b> to replace it.\n"
+            f"Or <b>Reset</b> to the default unicode."
+        )
+    else:
+        text = (
+            f"🎨 <b>{label}</b>\n\n"
+            f"Current: {current}\n\n"
+            f"Tap <b>Set Emoji</b> and send a premium or normal emoji.\n"
+            f"<i>Only the new emoji will show — old one is replaced.</i>"
+        )
 
     keyboard = [
         [InlineKeyboardButton("✏️ Set Emoji", callback_data=f"custom_setval_{key}")],
-        [InlineKeyboardButton("🔄 Update Emoji", callback_data=f"custom_update_{key}")],
         [InlineKeyboardButton("🔄 Reset to Default", callback_data=f"custom_reset_{key}")],
         [InlineKeyboardButton("🔙 Back", callback_data=f"custom_sec_{_find_section(key)}")],
     ]
@@ -2018,27 +2032,20 @@ async def custom_set_value_start(update: Update, context: ContextTypes.DEFAULT_T
     await query.answer()
 
     key = query.data.replace("custom_setval_", "").replace("custom_update_", "")
-    is_update = query.data.startswith("custom_update_")
     context.user_data["admin_state"] = "custom_setval"
     context.user_data["admin_data"] = {"emoji_key": key}
 
     label = LABELS.get(key, key)
-    current = eget(key)
-    premium_id = get_premium_id(key)
-    premium_info = ""
-    if premium_id:
-        premium_info = f"\nPremium ID: <code>{premium_id}</code>"
 
-    action = "Update" if is_update else "Set"
     await query.edit_message_text(
-        f"✏️ <b>{action} Emoji for:</b> {label}\n"
-        f"Current: {current}{premium_info}\n\n"
-        f"<b>Send the new emoji now:</b>\n\n"
+        f"✏️ <b>Set emoji for:</b> {label}\n\n"
+        f"<b>Send the new emoji now</b> (it will replace the old one completely):\n\n"
         f"<b>Premium animated emoji:</b>\n"
-        f"  • Open Telegram's emoji/sticker panel\n"
-        f"  • Tap an animated custom emoji\n\n"
+        f"  • Open Telegram emoji panel\n"
+        f"  • Tap a premium / animated emoji\n"
+        f"  • Send it alone in this chat\n\n"
         f"<b>Normal emoji:</b>\n"
-        f"  • Just type the emoji character\n\n"
+        f"  • Type one emoji character\n\n"
         f"<i>Send ONLY the emoji — no extra text.</i>",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([[
@@ -2048,24 +2055,25 @@ async def custom_set_value_start(update: Update, context: ContextTypes.DEFAULT_T
 
 
 async def custom_reset_key(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Reset an emoji key to its default and sync button config."""
+    """Reset an emoji key to its default and clear premium icon from button config."""
     query = update.callback_query
     await query.answer()
 
     key = query.data.replace("custom_reset_", "")
     reset(key)
-    # Also clear custom emoji ID in button config for menu buttons
-    if key in ["menu_profile", "menu_product", "menu_wallet", "menu_myorder"]:
-        try:
-            from utils.emoji_manager import load_button_config, save_button_config
-            btn_cfg = load_button_config()
-            if key in btn_cfg:
-                btn_cfg[key]["icon_custom_emoji_id"] = None
-                save_button_config(btn_cfg)
-        except Exception as e:
-            logger.error(f"Error resetting custom emoji ID in button config for {key}: {e}")
+    # Clear premium icon for this key on all button configs
+    try:
+        from utils.emoji_manager import load_button_config, save_button_config, reload, reload_button_cache
+        btn_cfg = load_button_config()
+        if key in btn_cfg and isinstance(btn_cfg[key], dict):
+            btn_cfg[key]["icon_custom_emoji_id"] = None
+            save_button_config(btn_cfg)
+        reload()
+        reload_button_cache()
+    except Exception as e:
+        logger.error(f"Error resetting custom emoji ID in button config for {key}: {e}")
 
-    current = eget(key)  # rendered emoji for display
+    current = eget(key)
     label = LABELS.get(key, key)
 
     await query.edit_message_text(
@@ -2841,7 +2849,10 @@ async def admin_button_section(update: Update, context: ContextTypes.DEFAULT_TYP
     query = update.callback_query
     await query.answer()
 
-    from utils.emoji_manager import BTN_SECTIONS, BTN_LABELS, get_button_style, get_plain, get_premium_id, load_button_config
+    from utils.emoji_manager import (
+        BTN_SECTIONS, BTN_LABELS, get_button_style, get_plain, get_premium_id,
+        load_button_config, strip_leading_emoji,
+    )
 
     section_name = query.data.replace("btn_sec_", "")
     if section_name == "🧩 Other":
@@ -2856,19 +2867,25 @@ async def admin_button_section(update: Update, context: ContextTypes.DEFAULT_TYP
 
     buttons = []
     for key in keys:
-        emoji = get_plain(key)  # plain emoji for button display
+        emoji = get_plain(key)
         label = BTN_LABELS.get(key, key)
         premium_id = get_premium_id(key)
         style = get_button_style(key)
 
-        # Build button as it appears on the real bot
-        btn_text = f"{emoji} {label}" if not premium_id else label
+        # Premium: text only (strip unicode). Plain: unicode + label
+        if premium_id:
+            btn_text = strip_leading_emoji(label) or label
+        else:
+            btn_text = f"{emoji} {label}".strip()
         btn_kwargs = {"text": btn_text, "callback_data": f"btn_detail_{key}"}
         if premium_id:
-            btn_kwargs["icon_custom_emoji_id"] = premium_id
+            btn_kwargs["icon_custom_emoji_id"] = str(premium_id)
         if style:
             btn_kwargs["style"] = style
-        buttons.append([InlineKeyboardButton(**btn_kwargs)])
+        try:
+            buttons.append([InlineKeyboardButton(**btn_kwargs)])
+        except TypeError:
+            buttons.append([InlineKeyboardButton(text=btn_text, callback_data=f"btn_detail_{key}")])
 
     buttons.append([InlineKeyboardButton("🔙 Back", callback_data="admin_button_styles")])
 
@@ -2992,49 +3009,166 @@ async def admin_button_style_set(update: Update, context: ContextTypes.DEFAULT_T
 # BACKUP & RESTORE
 # ===========================================================================
 async def admin_backup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show backup & restore menu."""
+    """Show backup & restore menu + auto-backup status from Supabase."""
     query = update.callback_query
     await query.answer()
 
+    auto_line = "<i>No auto-backup yet — first run after deploy.</i>"
+    try:
+        from services.supabase_sync import get_auto_backup_meta
+        meta = get_auto_backup_meta()
+        if meta:
+            auto_line = (
+                f"✅ Last auto-backup: <b>{meta.get('timestamp', '?')}</b>\n"
+                f"📊 {meta.get('total_rows', 0)} rows · stored in Supabase"
+            )
+    except Exception as e:
+        auto_line = f"⚠️ Auto-backup status unavailable: {e}"
+
     keyboard = [
-        [InlineKeyboardButton("💾 Create Backup", callback_data="admin_backup_create")],
-        [InlineKeyboardButton("📥 Restore Backup", callback_data="admin_backup_restore")],
+        [InlineKeyboardButton("💾 Create Backup (file)", callback_data="admin_backup_create")],
+        [InlineKeyboardButton("☁️ Run Auto-Backup Now", callback_data="admin_backup_auto_now")],
+        [InlineKeyboardButton("♻️ Restore Latest Auto-Backup", callback_data="admin_backup_auto_restore")],
+        [InlineKeyboardButton("📥 Restore from File", callback_data="admin_backup_restore")],
         [InlineKeyboardButton("🔙 Back", callback_data="admin_panel")],
     ]
 
     await query.edit_message_text(
         "💾 <b>Backup & Restore</b>\n\n"
-        "• <b>Create Backup</b>: Export all data from Supabase as a JSON file\n"
-        "• <b>Restore Backup</b>: Upload a backup file to restore all data\n\n"
+        f"{auto_line}\n\n"
+        "• <b>Create Backup</b>: Download JSON file from Supabase\n"
+        "• <b>Auto-Backup</b>: Saves to Supabase every 24h automatically\n"
+        "• <b>Restore</b>: Overwrite live data from backup\n\n"
         "⚠️ Restore will <b>overwrite</b> all existing data!",
         parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 
+async def admin_backup_auto_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Run one auto-backup to Supabase immediately."""
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("☁️ <b>Saving auto-backup to Supabase...</b>", parse_mode="HTML")
+    try:
+        from services.supabase_sync import save_auto_backup_to_supabase
+        meta = save_auto_backup_to_supabase()
+        await query.edit_message_text(
+            f"✅ <b>Auto-backup saved to Supabase</b>\n\n"
+            f"📅 {meta.get('timestamp')}\n"
+            f"📊 {meta.get('total_rows', 0)} rows\n"
+            f"🔑 key: <code>{meta.get('data_key', 'auto_backup_latest')}</code>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 Back", callback_data="admin_backup")
+            ]]),
+        )
+    except Exception as e:
+        logger.error(f"Manual auto-backup failed: {e}")
+        await query.edit_message_text(
+            f"❌ Auto-backup failed: {e}",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 Back", callback_data="admin_backup")
+            ]]),
+        )
+
+
+async def admin_backup_auto_restore(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Confirm restore from latest Supabase auto-backup."""
+    query = update.callback_query
+    await query.answer()
+
+    from services.supabase_sync import get_auto_backup_meta
+    meta = get_auto_backup_meta()
+    if not meta:
+        await query.edit_message_text(
+            "❌ No auto-backup found in Supabase yet.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 Back", callback_data="admin_backup")
+            ]]),
+        )
+        return
+
+    await query.edit_message_text(
+        "⚠️ <b>Restore Latest Auto-Backup?</b>\n\n"
+        f"📅 {meta.get('timestamp')}\n"
+        f"📊 {meta.get('total_rows', 0)} rows\n\n"
+        "This will <b>DELETE</b> current data and replace it.\n"
+        "This cannot be undone.",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Confirm Restore", callback_data="admin_backup_auto_restore_go")],
+            [InlineKeyboardButton("❌ Cancel", callback_data="admin_backup")],
+        ]),
+    )
+
+
+async def admin_backup_auto_restore_go(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Execute restore from latest Supabase auto-backup."""
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("♻️ Restoring from Supabase auto-backup...", parse_mode="HTML")
+    try:
+        from services.supabase_sync import restore_latest_auto_backup
+        result = restore_latest_auto_backup()
+        if result.get("success"):
+            try:
+                from utils.emoji_manager import reload, reload_button_cache
+                reload()
+                reload_button_cache()
+            except Exception:
+                pass
+            lines = [f"✅ <b>Restored from auto-backup</b>\n"]
+            for table, status in (result.get("results") or {}).items():
+                icon = "✅" if str(status).startswith("restored") else "⚠️"
+                lines.append(f"  {icon} {table}: {status}")
+            text = "\n".join(lines)
+        else:
+            text = f"❌ Restore failed: {result.get('error', 'Unknown')}"
+    except Exception as e:
+        logger.error(f"Auto-restore failed: {e}")
+        text = f"❌ Restore error: {e}"
+
+    await query.edit_message_text(
+        text[:4000],
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("🔙 Back", callback_data="admin_backup")
+        ]]),
+    )
+
+
 async def admin_backup_create(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Create a backup of Supabase data and send as JSON file."""
+    """Create a backup of Supabase data and send as JSON file (+ store auto-backup)."""
     query = update.callback_query
     await query.answer()
 
     await query.edit_message_text("💾 <b>Creating backup...</b>\n\nReading data from Supabase...", parse_mode="HTML")
 
     try:
-        from services.supabase_sync import backup_to_bytesio
+        from services.supabase_sync import backup_to_bytesio, save_auto_backup_to_supabase
         buf, timestamp, total_rows = backup_to_bytesio()
+
+        # Also refresh cloud auto-backup
+        try:
+            save_auto_backup_to_supabase()
+        except Exception as e:
+            logger.warning(f"Cloud auto-backup after file export failed: {e}")
 
         await context.bot.send_document(
             chat_id=query.message.chat_id,
             document=buf,
             caption=f"💾 <b>Database Backup</b>\n\n"
                     f"📅 {timestamp}\n"
-                    f"📊 {total_rows} rows across {8} tables",
+                    f"📊 {total_rows} rows across {8} tables\n"
+                    f"☁️ Also saved to Supabase auto-backup",
             parse_mode="HTML",
         )
 
         await query.edit_message_text(
             f"✅ <b>Backup created!</b>\n\n"
             f"📅 {timestamp}\n"
-            f"📊 {total_rows} rows exported\n\n"
+            f"📊 {total_rows} rows exported\n"
+            f"☁️ Synced to Supabase auto-backup\n\n"
             f"File sent above. Keep it safe!",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[
@@ -3700,50 +3834,73 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     # --- Custom Emoji Set ---
     elif state == "custom_setval":
         key = data.get("emoji_key")
+        if not key:
+            await update.message.reply_html("❌ Missing emoji key. Open Customize again.")
+            return
 
-        # Use _extract_emoji which correctly handles premium custom emojis
-        emoji_raw = _extract_emoji(update.message)
-        custom_emoji_id = None
+        # Premium → dict {"p","f"}; plain → unicode string
+        emoji_value, custom_emoji_id = _extract_emoji_value(update.message)
+        if not emoji_value and not custom_emoji_id:
+            await update.message.reply_html(
+                "❌ No emoji detected.\n\n"
+                "Send <b>only</b> one premium or normal emoji (no text).",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 Try again", callback_data=f"custom_setval_{key}"),
+                ]]),
+            )
+            return
 
-        # _extract_emoji returns JSON string for premium, plain char for normal
-        if emoji_raw.startswith("{") and emoji_raw.endswith("}"):
-            try:
-                emoji_value = json.loads(emoji_raw)
-                custom_emoji_id = emoji_value.get("p")
-            except (json.JSONDecodeError, TypeError):
-                emoji_value = emoji_raw[:4]
+        # Prefer DEFAULTS fallback if premium fallback is empty/weird
+        if isinstance(emoji_value, dict) and custom_emoji_id:
+            if not emoji_value.get("f"):
+                emoji_value["f"] = DEFAULTS.get(key) or "⭐"
+            set_emoji(key, emoji_value)
         else:
-            emoji_value = emoji_raw[:4]
+            set_emoji(key, emoji_value if isinstance(emoji_value, str) else str(emoji_value))
 
-        set_emoji(key, emoji_value)
-        # Sync premium custom_emoji_id into button_config for EVERY key so that
-        # _make_smart_button (which reads button_config first) picks up the
-        # premium emoji on the home menu, shop, wallet, and every other button.
+        # Sync icon into button_config for ALL keys (admin + user buttons)
         try:
-            from utils.emoji_manager import load_button_config, save_button_config
+            from utils.emoji_manager import load_button_config, save_button_config, reload, reload_button_cache
             btn_cfg = load_button_config()
             entry = btn_cfg.get(key)
             if not isinstance(entry, dict):
-                # Create an entry only when we have something to store (premium ID),
-                # so plain-unicode emoji edits don't pollute button_config.
-                if custom_emoji_id:
-                    btn_cfg[key] = {"text": None, "icon_custom_emoji_id": custom_emoji_id, "style": None}
-                    save_button_config(btn_cfg)
+                btn_cfg[key] = {
+                    "text": None,
+                    "icon_custom_emoji_id": str(custom_emoji_id) if custom_emoji_id else None,
+                    "style": None,
+                }
             else:
-                entry["icon_custom_emoji_id"] = custom_emoji_id
-                save_button_config(btn_cfg)
+                entry["icon_custom_emoji_id"] = str(custom_emoji_id) if custom_emoji_id else None
+            save_button_config(btn_cfg)
+            reload()
+            reload_button_cache()
         except Exception as e:
             logger.error(f"Error syncing custom emoji ID in button config for {key}: {e}")
+
         label = LABELS.get(key, key)
         context.user_data.pop("admin_state", None)
         context.user_data.pop("admin_data", None)
 
+        # Success: show ONLY the new emoji (premium HTML or plain)
         display = eget(key)
+        detail_btn = InlineKeyboardButton("Emoji Details", callback_data=f"custom_emoji_{key}")
+        if custom_emoji_id:
+            try:
+                detail_btn = InlineKeyboardButton(
+                    "Emoji Details",
+                    callback_data=f"custom_emoji_{key}",
+                    icon_custom_emoji_id=str(custom_emoji_id),
+                )
+            except TypeError:
+                pass
+
         await update.message.reply_html(
-            f"✅ <b>{label}</b> set to: {display}",
+            f"✅ <b>{label}</b> updated\n\n"
+            f"New emoji: {display}\n"
+            f"<i>Old emoji replaced — only this one is used now.</i>",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("🎨 Customize", callback_data="admin_customize"),
-                InlineKeyboardButton("🔙 Emoji Details", callback_data=f"custom_emoji_{key}"),
+                detail_btn,
             ]]),
         )
 
@@ -4085,34 +4242,55 @@ def _message_to_html(message) -> str:
     return html_escape(text, quote=False) if text else ""
 
 
+def _extract_emoji_value(message) -> tuple:
+    """
+    Extract emoji from a message for customize / product / category.
+
+    Returns (value, premium_id_or_None):
+      - Premium: ({"p": "id", "f": "⭐"}, "id")
+      - Plain:   ("⭐", None)
+
+    Uses MessageEntity.CUSTOM_EMOJI / "custom_emoji" (works with PTB enums).
+    """
+    text = (message.text or message.caption or "").strip()
+    entities = message.entities or message.caption_entities or []
+
+    for entity in entities:
+        etype = getattr(entity, "type", None)
+        etype_str = str(etype) if etype is not None else ""
+        if etype_str in ("custom_emoji", "MessageEntityType.CUSTOM_EMOJI") or (
+            getattr(etype, "value", None) == "custom_emoji"
+        ) or etype == "custom_emoji":
+            emoji_id = getattr(entity, "custom_emoji_id", None) or ""
+            if not emoji_id:
+                continue
+            fallback = "⭐"
+            if text:
+                try:
+                    utf16 = text.encode("utf-16-le")
+                    seg = utf16[entity.offset * 2:(entity.offset + entity.length) * 2]
+                    decoded = seg.decode("utf-16-le", errors="ignore").strip()
+                    if decoded:
+                        fallback = decoded
+                except Exception:
+                    pass
+            return {"p": str(emoji_id), "f": fallback}, str(emoji_id)
+
+    # Plain unicode — first grapheme cluster-ish (up to 8 code units for ZWJ)
+    if text:
+        return text[:8], None
+    return None, None
+
+
 def _extract_emoji(message) -> str:
     """
-    Extract emoji from a message, handling premium custom emojis.
-    - Plain unicode → stores as-is (e.g. "⭐")
-    - Premium custom emoji → stores as JSON dict string '{"p":"id","f":"⭐"}'
-      (compatible with emoji_manager.parse_db_emoji)
-    Fallback char is sliced in UTF-16 space to match the entity's offset/length.
+    Extract emoji for product/category storage.
+    - Plain unicode → e.g. "⭐"
+    - Premium → JSON string '{"p":"id","f":"⭐"}' (parse_db_emoji compatible)
     """
-    text = (message.text or "").strip()
-
-    # Check for premium Telegram custom emoji
-    if message.entities:
-        for entity in message.entities:
-            if entity.type == "custom_emoji":
-                emoji_id = getattr(entity, "custom_emoji_id", "")
-                if not emoji_id:
-                    break
-                fallback = "⭐"
-                if text:
-                    try:
-                        utf16 = text.encode("utf-16-le")
-                        seg = utf16[entity.offset * 2:(entity.offset + entity.length) * 2]
-                        decoded = seg.decode("utf-16-le", errors="ignore").strip()
-                        if decoded:
-                            fallback = decoded
-                    except Exception:
-                        pass
-                return json.dumps({"p": str(emoji_id), "f": fallback})
-
-    # Plain unicode emoji — take first 4 chars (covers most emojis including ZWJ sequences)
-    return text[:4] if text else "📦"
+    value, premium_id = _extract_emoji_value(message)
+    if premium_id and isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, str) and value:
+        return value[:8]
+    return "📦"

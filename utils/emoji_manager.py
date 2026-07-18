@@ -225,6 +225,45 @@ LABELS = {
 # ---------------------------------------------------------------------------
 _LEGACY_TAG_RE = re.compile(r'<tg-emoji\s+emoji-id="(\d+)"[^>]*>([^<]*)</tg-emoji>')
 
+# Leading emoji/pictograph strip — used when a premium icon_custom_emoji_id is set
+# so buttons show ONLY the new premium icon (not old unicode + premium together).
+_LEADING_EMOJI_RE = re.compile(
+    r"^(?:"
+    r"(?:"
+    r"[\U0001F1E6-\U0001F1FF]{2}"  # flags
+    r"|[\U0001F300-\U0001FAFF\U0001F000-\U0001F9FF\U00002700-\U000027BF"
+    r"\U00002600-\U000026FF\U0000FE00-\U0000FE0F\U0001F900-\U0001F9FF]"
+    r"|[\u2600-\u27BF]"
+    r")"
+    r"[\U0001F3FB-\U0001F3FF]?"  # skin tone
+    r"(?:\u200d"
+    r"(?:"
+    r"[\U0001F300-\U0001FAFF\U00002600-\U000027BF\u2600-\u27BF]"
+    r")[\U0001F3FB-\U0001F3FF]?"
+    r")*"
+    r"\ufe0f?"
+    r"\s*"
+    r")+"
+)
+
+
+def strip_leading_emoji(text: str) -> str:
+    """
+    Remove leading unicode emoji(s) from button/label text.
+    Use when icon_custom_emoji_id is set so Telegram shows only the premium icon.
+    Fallback: cut everything before the first letter/digit.
+    """
+    if not text:
+        return text or ""
+    cleaned = _LEADING_EMOJI_RE.sub("", text).strip()
+    if cleaned:
+        return cleaned
+    # Fallback: keep from first ASCII letter/digit
+    m = re.search(r"[A-Za-z0-9]", text)
+    if m:
+        return text[m.start():].strip()
+    return text.strip()
+
 # ---------------------------------------------------------------------------
 # Universal emoji parser — handles DB emoji strings in any format
 # ---------------------------------------------------------------------------

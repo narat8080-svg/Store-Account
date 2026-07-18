@@ -17,7 +17,7 @@ from telegram.ext import (
 from config import BOT_TOKEN, DEPOSIT_AMOUNTS, ADMIN_ID, SUPPORT_USERNAME, WEBHOOK_URL, WEBHOOK_PORT, WEBHOOK_PATH
 from utils.emoji_manager import (get as E, get_plain as EP, get_premium_id as EID,
                            emoji_for_html, emoji_for_button, emoji_premium_id,
-                           parse_db_emoji)
+                           parse_db_emoji, strip_leading_emoji)
 from services.database import (
     get_db,
     get_or_create_user,
@@ -134,6 +134,9 @@ from admin import (
     admin_backup_create,
     admin_backup_restore,
     admin_backup_restore_execute,
+    admin_backup_auto_now,
+    admin_backup_auto_restore,
+    admin_backup_auto_restore_go,
     # Payments
     admin_payments,
     admin_pay_list,
@@ -291,7 +294,9 @@ def _get_button_style(key: str, stock_count: int = None) -> str | None:
 
 def _make_smart_button(text: str, callback_data: str, key: str = None,
                        stock_count: int = None) -> InlineKeyboardButton:
-    """Create a button with style and emoji from config. PTB-version safe."""
+    """Create a button with style and emoji from config. PTB-version safe.
+    Premium icon replaces old unicode — never show both together.
+    """
     btn_cfg = _load_btn_cfg()
     cfg = btn_cfg.get(key, {}) if key else {}
 
@@ -300,10 +305,19 @@ def _make_smart_button(text: str, callback_data: str, key: str = None,
     style = _get_button_style(key, stock_count) if key else None
 
     if icon_custom_emoji_id:
-        button_text = cfg.get("text") or text
+        # Only label text — strip any leftover unicode emoji
+        raw = cfg.get("text") or text or "•"
+        button_text = strip_leading_emoji(str(raw)) or str(raw)
     else:
-        plain = _safe_emoji(key)
-        button_text = f"{plain} {text}".strip() if plain else text
+        plain = _safe_emoji(key) if key else ""
+        # Avoid duplicating if text already starts with the plain emoji
+        base = text or ""
+        if plain and base.startswith(plain):
+            button_text = base
+        elif plain:
+            button_text = f"{plain} {base}".strip()
+        else:
+            button_text = base
 
     return _safe_button(button_text, callback_data, icon_custom_emoji_id, style)
 
@@ -325,19 +339,23 @@ def _safe_button(text: str, callback_data: str,
 def _make_url_button(text: str, url: str, key: str = None) -> InlineKeyboardButton:
     """
     Create a URL button with premium emoji from config.
-    Style is not supported on URL buttons by Telegram API.
+    Premium icon only — never old unicode + new together.
     """
     btn_cfg = _load_btn_cfg()
     cfg = btn_cfg.get(key, {}) if key else {}
 
-    # Premium emoji icon from emoji_config
     icon_custom_emoji_id = _safe_premium_id(key) if key else None
 
     if icon_custom_emoji_id:
-        button_text = cfg.get("text") or text
+        raw = cfg.get("text") or text or "•"
+        button_text = strip_leading_emoji(str(raw)) or str(raw)
     else:
-        plain = _safe_emoji(key)
-        button_text = f"{plain} {text}".strip() if plain else text
+        plain = _safe_emoji(key) if key else ""
+        base = text or ""
+        if plain and not base.startswith(plain):
+            button_text = f"{plain} {base}".strip()
+        else:
+            button_text = base
 
     kwargs = {"text": button_text, "url": url}
     if icon_custom_emoji_id:
@@ -345,7 +363,7 @@ def _make_url_button(text: str, url: str, key: str = None) -> InlineKeyboardButt
     try:
         return InlineKeyboardButton(**kwargs)
     except TypeError:
-        return InlineKeyboardButton(text=text, url=url)
+        return InlineKeyboardButton(text=button_text, url=url)
 
 
 def _main_menu_keyboard() -> InlineKeyboardMarkup:
@@ -779,14 +797,14 @@ async def product_categories(update: Update, context: ContextTypes.DEFAULT_TYPE)
         else:
             stock_label = f" ({stock} left)" if 0 < stock <= 3 else ""
             out_label = " Out of Stock" if stock == 0 else ""
-        label = f"{emoji_for_button(p['emoji'])} {p['name']} — ${p['price']:.2f}{stock_label}{out_label}"
-
+        name_part = f"{p['name']} — ${p['price']:.2f}{stock_label}{out_label}"
         pid = emoji_premium_id(p['emoji'])
         icon_id = str(pid) if pid else None
         if pid:
-            plain, _ = parse_db_emoji(p['emoji'])
-            if label.startswith(plain):
-                label = label[len(plain):].strip()
+            # Premium icon only — no old unicode beside it
+            label = name_part
+        else:
+            label = f"{emoji_for_button(p['emoji'])} {name_part}"
         style = _get_button_style("buy", 999 if is_unlimited else stock)
         buttons.append([_safe_button(label, f"buy_detail_{p['id']}", icon_id, style)])
 
@@ -1663,17 +1681,15 @@ async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             continue
 
         db_emoji = o.get("product_emoji", "📦")
-        emoji = emoji_for_button(db_emoji)
         name = o.get("product_name") or f"Product #{o.get('product_id', '?')}"
         date = (o.get("created_at", "")[:10] or "?")
         amount = float(o.get("amount") or 0)
-        btn_text = f"{emoji} {name} — ${amount:.2f} | {date}"
         pid = emoji_premium_id(db_emoji)
         icon_id = str(pid) if pid else None
         if pid:
-            plain, _ = parse_db_emoji(db_emoji)
-            if btn_text.startswith(plain):
-                btn_text = btn_text[len(plain):].strip()
+            btn_text = f"{name} — ${amount:.2f} | {date}"
+        else:
+            btn_text = f"{emoji_for_button(db_emoji)} {name} — ${amount:.2f} | {date}"
         buttons.append([_safe_button(btn_text, f"order_detail_{o['id']}", icon_id)])
 
     if not buttons:
@@ -2077,6 +2093,12 @@ async def _route_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, da
         await admin_backup_create(update, context)
     elif data == "admin_backup_restore":
         await admin_backup_restore(update, context)
+    elif data == "admin_backup_auto_now":
+        await admin_backup_auto_now(update, context)
+    elif data == "admin_backup_auto_restore":
+        await admin_backup_auto_restore(update, context)
+    elif data == "admin_backup_auto_restore_go":
+        await admin_backup_auto_restore_go(update, context)
 
     # --- Admin Button Styles ---
     elif data == "admin_button_styles":
@@ -2303,6 +2325,39 @@ async def _handle_custom_deposit(update: Update, context: ContextTypes.DEFAULT_T
 
 
 # ===========================================================================
+# AUTO BACKUP JOB (Supabase)
+# ===========================================================================
+async def _auto_backup_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Periodic job: export DB snapshot into Supabase bot_settings."""
+    try:
+        from services.supabase_sync import save_auto_backup_to_supabase
+        meta = await asyncio.to_thread(save_auto_backup_to_supabase)
+        logger.info(
+            f"☁️ Auto-backup OK: {meta.get('total_rows', 0)} rows @ {meta.get('timestamp')}"
+        )
+    except Exception as e:
+        logger.error(f"☁️ Auto-backup job failed: {e}")
+
+
+async def _post_init(app: Application) -> None:
+    """Start scheduled auto-backup after the application is ready."""
+    # First backup ~2 minutes after boot, then every 24 hours
+    if app.job_queue:
+        app.job_queue.run_repeating(
+            _auto_backup_job,
+            interval=24 * 60 * 60,  # 24 hours
+            first=120,             # 2 minutes after start
+            name="supabase_auto_backup",
+        )
+        logger.info("☁️ Supabase auto-backup scheduled (every 24h, first in 2 min)")
+    else:
+        logger.warning(
+            "☁️ JobQueue not available — install python-telegram-bot[job-queue] "
+            "for scheduled auto-backup. Manual backup still works."
+        )
+
+
+# ===========================================================================
 # MAIN
 # ===========================================================================
 def main() -> None:
@@ -2312,6 +2367,7 @@ def main() -> None:
         Application.builder()
         .token(BOT_TOKEN)
         .concurrent_updates(True)
+        .post_init(_post_init)
         .build()
     )
 
