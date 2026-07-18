@@ -9,7 +9,8 @@ load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 # Telegram
 # ---------------------------------------------------------------------------
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+# Only this Telegram user may access admin + backup info
+ADMIN_ID = int(os.getenv("ADMIN_ID", "7322712989") or "7322712989")
 
 # ---------------------------------------------------------------------------
 # Bakong KHQR (legacy SDK — kept for backward compatibility)

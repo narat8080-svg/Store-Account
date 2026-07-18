@@ -3075,21 +3075,47 @@ async def admin_button_style_set(update: Update, context: ContextTypes.DEFAULT_T
 
 
 # ===========================================================================
-# BACKUP & RESTORE
+# BACKUP & RESTORE  (ADMIN ONLY — user id 7322712989 / config.ADMIN_ID)
 # ===========================================================================
+def _is_backup_admin(user) -> bool:
+    """Only the real admin may see backup status or run restore."""
+    try:
+        return user is not None and int(user.id) == int(ADMIN_ID)
+    except (TypeError, ValueError, AttributeError):
+        return False
+
+
+async def _deny_backup(query) -> None:
+    """Silent deny — never show backup details to non-admin."""
+    try:
+        await query.answer("⛔ Access denied.", show_alert=True)
+    except Exception:
+        pass
+    try:
+        await query.edit_message_text("⛔ Access denied.")
+    except Exception:
+        pass
+
+
 async def admin_backup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show backup & restore menu + auto-backup status from Supabase."""
+    """Show backup & restore menu — admin only."""
     query = update.callback_query
+    user = update.effective_user
+    if not _is_backup_admin(user):
+        await _deny_backup(query)
+        return
     await query.answer()
 
-    auto_line = "<i>No auto-backup yet — first run after deploy.</i>"
+    auto_line = "<i>No auto-backup yet — first run after deploy (~2 min).</i>"
     try:
-        from services.supabase_sync import get_auto_backup_meta
+        from services.supabase_sync import get_auto_backup_meta, get_auto_backup_history
         meta = get_auto_backup_meta()
+        hist = get_auto_backup_history()
         if meta:
             auto_line = (
                 f"✅ Last auto-backup: <b>{meta.get('timestamp', '?')}</b>\n"
-                f"📊 {meta.get('total_rows', 0)} rows · stored in Supabase"
+                f"📊 {meta.get('total_rows', 0)} rows · stored in Supabase\n"
+                f"🗂 Snapshots kept: <b>{len(hist) or 1}</b>"
             )
     except Exception as e:
         auto_line = f"⚠️ Auto-backup status unavailable: {e}"
@@ -3103,19 +3129,24 @@ async def admin_backup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     ]
 
     await query.edit_message_text(
-        "💾 <b>Backup & Restore</b>\n\n"
+        "💾 <b>Backup & Restore</b> <i>(admin only)</i>\n\n"
         f"{auto_line}\n\n"
-        "• <b>Create Backup</b>: Download JSON file from Supabase\n"
-        "• <b>Auto-Backup</b>: Saves to Supabase every 24h automatically\n"
-        "• <b>Restore</b>: Overwrite live data from backup\n\n"
-        "⚠️ Restore will <b>overwrite</b> all existing data!",
+        "• <b>Auto-Backup</b>: every 24h → Supabase (silent for users)\n"
+        "• <b>Run Auto-Backup Now</b>: save cloud snapshot now\n"
+        "• <b>Restore Latest Auto-Backup</b>: load last Supabase snapshot\n"
+        "• <b>Create / Restore file</b>: download or upload JSON\n\n"
+        "⚠️ Restore overwrites live store data.\n"
+        "🔒 Backup info is never shown to other users.",
         parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 
 async def admin_backup_auto_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Run one auto-backup to Supabase immediately."""
+    """Run one auto-backup to Supabase immediately — admin only."""
     query = update.callback_query
+    if not _is_backup_admin(update.effective_user):
+        await _deny_backup(query)
+        return
     await query.answer()
     await query.edit_message_text("☁️ <b>Saving auto-backup to Supabase...</b>", parse_mode="HTML")
     try:
@@ -3125,7 +3156,7 @@ async def admin_backup_auto_now(update: Update, context: ContextTypes.DEFAULT_TY
             f"✅ <b>Auto-backup saved to Supabase</b>\n\n"
             f"📅 {meta.get('timestamp')}\n"
             f"📊 {meta.get('total_rows', 0)} rows\n"
-            f"🔑 key: <code>{meta.get('data_key', 'auto_backup_latest')}</code>",
+            f"🔑 <code>{meta.get('data_key', 'auto_backup_latest')}</code>",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("🔙 Back", callback_data="admin_backup")
@@ -3142,15 +3173,20 @@ async def admin_backup_auto_now(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def admin_backup_auto_restore(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Confirm restore from latest Supabase auto-backup."""
+    """Confirm restore from latest Supabase auto-backup — admin only."""
     query = update.callback_query
+    if not _is_backup_admin(update.effective_user):
+        await _deny_backup(query)
+        return
     await query.answer()
 
     from services.supabase_sync import get_auto_backup_meta
     meta = get_auto_backup_meta()
     if not meta:
         await query.edit_message_text(
-            "❌ No auto-backup found in Supabase yet.",
+            "❌ No auto-backup found in Supabase yet.\n"
+            "Use <b>Run Auto-Backup Now</b> first.",
+            parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("🔙 Back", callback_data="admin_backup")
             ]]),
@@ -3161,7 +3197,8 @@ async def admin_backup_auto_restore(update: Update, context: ContextTypes.DEFAUL
         "⚠️ <b>Restore Latest Auto-Backup?</b>\n\n"
         f"📅 {meta.get('timestamp')}\n"
         f"📊 {meta.get('total_rows', 0)} rows\n\n"
-        "This will <b>DELETE</b> current data and replace it.\n"
+        "This will <b>DELETE</b> current store data and replace it "
+        "from Supabase auto-backup.\n"
         "This cannot be undone.",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([
@@ -3172,8 +3209,11 @@ async def admin_backup_auto_restore(update: Update, context: ContextTypes.DEFAUL
 
 
 async def admin_backup_auto_restore_go(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Execute restore from latest Supabase auto-backup."""
+    """Execute restore from latest Supabase auto-backup — admin only."""
     query = update.callback_query
+    if not _is_backup_admin(update.effective_user):
+        await _deny_backup(query)
+        return
     await query.answer()
     await query.edit_message_text("♻️ Restoring from Supabase auto-backup...", parse_mode="HTML")
     try:
@@ -3186,7 +3226,7 @@ async def admin_backup_auto_restore_go(update: Update, context: ContextTypes.DEF
                 reload_button_cache()
             except Exception:
                 pass
-            lines = [f"✅ <b>Restored from auto-backup</b>\n"]
+            lines = [f"✅ <b>Restored from Supabase auto-backup</b>\n"]
             for table, status in (result.get("results") or {}).items():
                 icon = "✅" if str(status).startswith("restored") else "⚠️"
                 lines.append(f"  {icon} {table}: {status}")
@@ -3207,29 +3247,37 @@ async def admin_backup_auto_restore_go(update: Update, context: ContextTypes.DEF
 
 
 async def admin_backup_create(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Create a backup of Supabase data and send as JSON file (+ store auto-backup)."""
+    """Create backup file + cloud snapshot — admin only."""
     query = update.callback_query
+    if not _is_backup_admin(update.effective_user):
+        await _deny_backup(query)
+        return
     await query.answer()
 
-    await query.edit_message_text("💾 <b>Creating backup...</b>\n\nReading data from Supabase...", parse_mode="HTML")
+    await query.edit_message_text(
+        "💾 <b>Creating backup...</b>\n\nReading data from Supabase...",
+        parse_mode="HTML",
+    )
 
     try:
         from services.supabase_sync import backup_to_bytesio, save_auto_backup_to_supabase
         buf, timestamp, total_rows = backup_to_bytesio()
 
-        # Also refresh cloud auto-backup
         try:
             save_auto_backup_to_supabase()
         except Exception as e:
             logger.warning(f"Cloud auto-backup after file export failed: {e}")
 
+        # Send file only to admin chat (never groups / other users)
         await context.bot.send_document(
-            chat_id=query.message.chat_id,
+            chat_id=int(ADMIN_ID),
             document=buf,
-            caption=f"💾 <b>Database Backup</b>\n\n"
-                    f"📅 {timestamp}\n"
-                    f"📊 {total_rows} rows across {8} tables\n"
-                    f"☁️ Also saved to Supabase auto-backup",
+            caption=(
+                f"💾 <b>Database Backup</b> (admin only)\n\n"
+                f"📅 {timestamp}\n"
+                f"📊 {total_rows} rows\n"
+                f"☁️ Also saved to Supabase auto-backup"
+            ),
             parse_mode="HTML",
         )
 
@@ -3238,7 +3286,7 @@ async def admin_backup_create(update: Update, context: ContextTypes.DEFAULT_TYPE
             f"📅 {timestamp}\n"
             f"📊 {total_rows} rows exported\n"
             f"☁️ Synced to Supabase auto-backup\n\n"
-            f"File sent above. Keep it safe!",
+            f"File sent to you in private.",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("🔙 Back", callback_data="admin_backup")
@@ -3255,14 +3303,17 @@ async def admin_backup_create(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def admin_backup_restore(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Prompt admin to upload a backup file for restore."""
+    """Prompt admin to upload a backup file for restore — admin only."""
     query = update.callback_query
+    if not _is_backup_admin(update.effective_user):
+        await _deny_backup(query)
+        return
     await query.answer()
 
     context.user_data["admin_state"] = "backup_restore_upload"
 
     await query.edit_message_text(
-        "⚠️ <b>Restore Backup</b>\n\n"
+        "⚠️ <b>Restore Backup</b> (admin only)\n\n"
         "This will <b>DELETE all existing data</b> and replace it with the backup.\n\n"
         "📤 <b>Upload</b> the backup JSON file now to begin restore.\n\n"
         "<i>Send /cancel to abort.</i>",
@@ -3274,8 +3325,12 @@ async def admin_backup_restore(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def admin_backup_restore_execute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Execute restore from an uploaded backup file (document)."""
+    """Execute restore from an uploaded backup file (document) — admin only."""
     msg = update.effective_message
+    if not _is_backup_admin(update.effective_user):
+        if msg:
+            await msg.reply_text("⛔ Access denied.")
+        return
 
     await msg.reply_html("📥 <b>Downloading backup file...</b>")
 

@@ -59,10 +59,27 @@ def get_supabase():
 # ===========================================================================
 # BACKUP — Export all Supabase data to JSON
 # ===========================================================================
+# Keys stored in bot_settings for cloud auto-backup — never re-export (avoids nested bloat)
+AUTO_BACKUP_KEY_PREFIXES = (
+    "auto_backup_latest",
+    "auto_backup_meta",
+    "auto_backup_history",
+    "auto_backup_data_",
+)
+
+
+def _is_auto_backup_setting_key(key: str) -> bool:
+    if not key:
+        return False
+    if key in ("auto_backup_latest", "auto_backup_meta", "auto_backup_history"):
+        return True
+    return str(key).startswith("auto_backup_data_")
+
+
 def create_backup() -> dict:
     """
     Export all Supabase tables to a JSON-serializable dict.
-    Returns {"success": True, "data": {...}, "timestamp": "..."} or error dict.
+    Excludes auto_backup_* bot_settings rows (those ARE the backups).
     """
     supabase = get_supabase()
     backup_data = {}
@@ -72,6 +89,9 @@ def create_backup() -> dict:
         try:
             result = supabase.table(table).select("*").execute()
             rows = result.data if result.data else []
+            # Never nest previous cloud backups inside a new backup
+            if table == "bot_settings":
+                rows = [r for r in rows if not _is_auto_backup_setting_key(r.get("key", ""))]
             backup_data[table] = rows
         except Exception as e:
             logger.warning(f"Backup: failed to read table {table}: {e}")
@@ -251,48 +271,85 @@ def restore_latest_auto_backup() -> dict:
 def restore_from_backup(backup_dict: dict) -> dict:
     """
     Restore Supabase tables from a backup dict (the "data" portion of a backup).
-    WARNING: This DELETES all existing data in each table before restoring!
-    Returns {"success": True, "results": {...}} or error dict.
+    WARNING: This DELETES all existing store data before restoring!
+
+    Preserves auto_backup_* rows in bot_settings so cloud snapshots stay intact.
     """
+    if not isinstance(backup_dict, dict):
+        return {"success": False, "error": "Invalid backup format", "results": {}}
+
+    # Support both raw table dict and wrapped {"data": {...}} exports
+    if "data" in backup_dict and isinstance(backup_dict["data"], dict):
+        # Heuristic: only unwrap if it looks like our export wrapper
+        if any(t in backup_dict["data"] for t in BACKUP_TABLES):
+            backup_dict = backup_dict["data"]
+
     supabase = get_supabase()
     results = {}
 
-    # ── Phase 1: DELETE all rows in reverse-dependency order ──
+    # Keep cloud auto-backup snapshots across restore
+    preserved_auto = []
+    try:
+        r = supabase.table("bot_settings").select("*").execute()
+        for row in (r.data or []):
+            if _is_auto_backup_setting_key(row.get("key", "")):
+                preserved_auto.append(row)
+    except Exception as e:
+        logger.warning(f"Restore: could not snapshot auto_backup keys: {e}")
+
+    # ── Phase 1: DELETE (bot_settings: only non-auto-backup keys) ──
     for table in DELETE_ORDER:
         pk = TABLE_PK.get(table, "id")
         try:
-            # Delete all rows by matching on a non-existent PK value
-            # For numeric PKs: .neq(pk, -1) deletes all (since PK is never negative)
-            # For text PKs: .neq(pk, "___NONEXISTENT___") deletes all
-            sentinel = -1 if pk != "key" else "___NONEXISTENT___"
-            supabase.table(table).delete().neq(pk, sentinel).execute()
-            results.setdefault("_deletes", {})[table] = "deleted"
+            if table == "bot_settings":
+                r = supabase.table("bot_settings").select("key").execute()
+                for row in (r.data or []):
+                    k = row.get("key", "")
+                    if not _is_auto_backup_setting_key(k):
+                        supabase.table("bot_settings").delete().eq("key", k).execute()
+                results.setdefault("_deletes", {})[table] = "deleted (kept auto_backup)"
+            else:
+                sentinel = -1 if pk != "key" else "___NONEXISTENT___"
+                supabase.table(table).delete().neq(pk, sentinel).execute()
+                results.setdefault("_deletes", {})[table] = "deleted"
         except Exception as e:
             logger.warning(f"Restore: delete failed for {table}: {e}")
-            # Try truncate via upsert with empty filter (may still fail on FK)
             results.setdefault("_deletes", {})[table] = f"delete_warn: {str(e)[:80]}"
 
-    # ── Phase 2: INSERT backup rows in dependency order ──
+    # ── Phase 2: INSERT backup rows ──
     for table in BACKUP_TABLES:
-        rows = backup_dict.get(table, [])
+        rows = backup_dict.get(table, []) or []
+        if table == "bot_settings":
+            rows = [r for r in rows if not _is_auto_backup_setting_key(r.get("key", ""))]
         if not rows:
             results[table] = "empty (skipped)"
             continue
 
         try:
-            batch_size = 50  # smaller batches to avoid timeouts
+            batch_size = 50
             for i in range(0, len(rows), batch_size):
                 batch = rows[i:i + batch_size]
                 supabase.table(table).insert(batch).execute()
-
             results[table] = f"restored {len(rows)} rows"
         except Exception as e:
             logger.error(f"Restore failed for table {table}: {e}")
             results[table] = f"failed: {str(e)[:100]}"
 
-    success_count = sum(1 for v in results.values()
-                        if isinstance(v, str) and v.startswith("restored"))
-    results.pop("_deletes", None)  # internal key, not for display
+    # Re-apply preserved auto-backup keys (source of truth for cloud restore)
+    if preserved_auto:
+        try:
+            for row in preserved_auto:
+                supabase.table("bot_settings").upsert(row, on_conflict="key").execute()
+            results["auto_backup_preserved"] = f"{len(preserved_auto)} keys"
+        except Exception as e:
+            logger.warning(f"Restore: re-upsert auto_backup keys failed: {e}")
+
+    success_count = sum(
+        1 for k, v in results.items()
+        if k not in ("_deletes", "auto_backup_preserved")
+        and isinstance(v, str) and v.startswith("restored")
+    )
+    results.pop("_deletes", None)
     return {
         "success": success_count > 0,
         "results": results,

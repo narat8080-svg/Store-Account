@@ -1888,6 +1888,16 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def _route_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, data: str) -> None:
     """Dispatch a callback query to the matching handler."""
     query = update.callback_query
+    user = update.effective_user
+
+    # Backup / restore UI is admin-only — never expose status to other users
+    if data.startswith("admin_backup"):
+        if not user or int(user.id) != int(ADMIN_ID):
+            try:
+                await query.answer("⛔ Access denied.", show_alert=True)
+            except Exception:
+                pass
+            return
 
     # --- Main Menu ---
     if data == "menu_profile":
@@ -2392,20 +2402,43 @@ async def _handle_custom_deposit(update: Update, context: ContextTypes.DEFAULT_T
 # AUTO BACKUP JOB (Supabase)
 # ===========================================================================
 async def _auto_backup_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Periodic job: export DB snapshot into Supabase bot_settings."""
+    """
+    Periodic job: save DB snapshot to Supabase.
+    Never posts to groups. Optional DM only to ADMIN_ID (7322712989).
+    """
     try:
         from services.supabase_sync import save_auto_backup_to_supabase
         meta = await asyncio.to_thread(save_auto_backup_to_supabase)
         logger.info(
             f"☁️ Auto-backup OK: {meta.get('total_rows', 0)} rows @ {meta.get('timestamp')}"
         )
+        # Silent for everyone except admin private DM
+        try:
+            await context.bot.send_message(
+                chat_id=int(ADMIN_ID),
+                text=(
+                    f"☁️ <b>Auto-backup complete</b> (admin only)\n\n"
+                    f"📅 {meta.get('timestamp')}\n"
+                    f"📊 {meta.get('total_rows', 0)} rows saved to Supabase"
+                ),
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass  # admin may not have started bot yet
     except Exception as e:
         logger.error(f"☁️ Auto-backup job failed: {e}")
+        try:
+            await context.bot.send_message(
+                chat_id=int(ADMIN_ID),
+                text=f"☁️ <b>Auto-backup failed</b> (admin only)\n\n<code>{e}</code>",
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
 
 
 async def _post_init(app: Application) -> None:
     """Start scheduled auto-backup after the application is ready."""
-    # First backup ~2 minutes after boot, then every 24 hours
     if app.job_queue:
         app.job_queue.run_repeating(
             _auto_backup_job,
@@ -2413,7 +2446,7 @@ async def _post_init(app: Application) -> None:
             first=120,             # 2 minutes after start
             name="supabase_auto_backup",
         )
-        logger.info("☁️ Supabase auto-backup scheduled (every 24h, first in 2 min)")
+        logger.info("☁️ Supabase auto-backup scheduled (every 24h, first in 2 min, admin DM only)")
     else:
         logger.warning(
             "☁️ JobQueue not available — install python-telegram-bot[job-queue] "
