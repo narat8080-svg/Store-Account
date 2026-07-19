@@ -1435,9 +1435,16 @@ async def admin_editstock_replace_start(update: Update, context: ContextTypes.DE
 # USER MANAGEMENT
 # ===========================================================================
 async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """User management hub — stats, search, browse all users."""
+    """User management hub — stats, search, browse all users. Supports Refresh."""
     query = update.callback_query
-    await query.answer()
+    data = (query.data or "") if query else ""
+    try:
+        if data == "admin_users_refresh":
+            await query.answer("🔄 Refreshed user stats", show_alert=False)
+        else:
+            await query.answer()
+    except Exception:
+        pass
 
     conn = get_db()
     try:
@@ -1463,17 +1470,29 @@ async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         f"🚫 Banned: <b>{banned}</b>\n"
         f"⭐ VIP Users: <b>{vip_count}</b>\n"
         f"💰 Total Balances: <b>${total_balance:.2f}</b>\n"
-        f"\n📋 <i>Use the buttons below to manage users.</i>"
+        f"\n📋 <i>Use the buttons below to manage users.</i>\n"
+        f"<i>Tap 🔄 Refresh to load newly registered users.</i>"
     )
 
     keyboard = [
         [_styled_btn(f"📋 View All Users ({total})", "admin_users_enhanced_0", "admin_users_btn")],
         [_styled_btn("🔍 Search by ID", "admin_search_user", "admin_users_btn")],
         [_styled_btn("⭐ VIP Management", "admin_users_enhanced_0", "admin_users_btn")],
+        [_styled_btn("🔄 Refresh", "admin_users_refresh", "refresh")],
         [_styled_btn("🔙 Back", "admin_panel", "admin_close")],
     ]
 
-    await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+    try:
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+    except Exception as e:
+        # Same content after refresh → Telegram "message is not modified"
+        if "not modified" in str(e).lower():
+            try:
+                await query.answer("✅ Refreshed — no changes", show_alert=False)
+            except Exception:
+                pass
+        else:
+            raise
 
 
 async def admin_list_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2560,14 +2579,24 @@ async def admin_pay_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 # ENHANCED USER MANAGEMENT
 # ===========================================================================
 async def admin_users_enhanced(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show paginated user list with stats (15 per page)."""
+    """Show paginated user list with stats (15 per page). Includes Refresh for new users."""
     query = update.callback_query
-    await query.answer()
-
-    # Parse page from callback: "admin_users_enhanced_0"
     data = query.data or "admin_users_enhanced_0"
+
+    # Refresh toast
+    is_refresh = "refresh" in (data or "")
     try:
-        page = int(data.replace("admin_users_enhanced_", "").split("_")[0])
+        if is_refresh:
+            await query.answer("🔄 Refreshing users…", show_alert=False)
+        else:
+            await query.answer()
+    except Exception:
+        pass
+
+    # Parse page: "admin_users_enhanced_0" or "admin_users_enhanced_refresh_0"
+    try:
+        body = data.replace("admin_users_enhanced_refresh_", "").replace("admin_users_enhanced_", "")
+        page = int(body.split("_")[0])
     except (ValueError, IndexError):
         page = 0
 
@@ -2589,9 +2618,10 @@ async def admin_users_enhanced(update: Update, context: ContextTypes.DEFAULT_TYP
 
     if not page_users:
         await query.edit_message_text("👥 No users found.",
-            reply_markup=InlineKeyboardMarkup([[
-                _styled_btn("🔙 Back", "admin_users", "admin_close")
-            ]]))
+            reply_markup=InlineKeyboardMarkup([
+                [_styled_btn("🔄 Refresh", "admin_users_enhanced_refresh_0", "refresh")],
+                [_styled_btn("🔙 Back", "admin_users", "admin_close")],
+            ]))
         return
 
     buttons = []
@@ -2609,21 +2639,36 @@ async def admin_users_enhanced(update: Update, context: ContextTypes.DEFAULT_TYP
     if page > 0:
         nav_row.append(_styled_btn("⬅️ Prev", f"admin_users_enhanced_{page - 1}", "admin_close"))
     nav_row.append(InlineKeyboardButton(
-        f"📄 {page + 1}/{total_pages}", callback_data="admin_users_enhanced_same"
+        f"📄 {page + 1}/{total_pages}", callback_data=f"admin_users_enhanced_{page}"
     ))
     if page < total_pages - 1:
         nav_row.append(_styled_btn("Next ➡️", f"admin_users_enhanced_{page + 1}", "admin_close"))
     if nav_row:
         buttons.append(nav_row)
 
-    buttons.append([_styled_btn("🔙 Back", "admin_users", "admin_close")])
+    # Refresh reloads list so newly registered users appear without leaving the menu
+    buttons.append([
+        _styled_btn("🔄 Refresh", f"admin_users_enhanced_refresh_{page}", "refresh"),
+        _styled_btn("🔙 Back", "admin_users", "admin_close"),
+    ])
 
-    await query.edit_message_text(
+    text = (
         f"👥 <b>All Users</b> ({total_users} total)\n"
-        f"Page {page + 1} of {total_pages} — sorted by spending\n\n"
-        f"<i>Tap a user for details & actions:</i>",
-        parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons)
+        f"Page {page + 1} of {total_pages} — newest first\n\n"
+        f"<i>Tap a user for details & actions. Use 🔄 Refresh to load new users.</i>"
     )
+    try:
+        await query.edit_message_text(
+            text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons)
+        )
+    except Exception as e:
+        if "not modified" in str(e).lower():
+            try:
+                await query.answer("✅ List is up to date", show_alert=False)
+            except Exception:
+                pass
+        else:
+            raise
 
 
 async def admin_user_vip_set(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4493,13 +4538,132 @@ def _back_button(target: str) -> InlineKeyboardMarkup:
     ]])
 
 
+def _utf16_len(s: str) -> int:
+    """Telegram entity offsets use UTF-16 code units."""
+    return len(s.encode("utf-16-le")) // 2
+
+
+def _utf16_slice(s: str, start: int, length: int) -> str:
+    """Slice string by UTF-16 offsets (Telegram entity offsets)."""
+    encoded = s.encode("utf-16-le")
+    return encoded[start * 2 : (start + length) * 2].decode("utf-16-le", errors="replace")
+
+
+def _entities_to_html(text: str, entities: list) -> str:
+    """
+    Build HTML from plain text + MessageEntity list.
+    Especially ensures premium custom_emoji → <tg-emoji emoji-id="...">…</tg-emoji>
+    so product descriptions render premium emoji mixed with normal text.
+    """
+    from html import escape as html_escape
+    from telegram import MessageEntity
+
+    if not text:
+        return ""
+    if not entities:
+        return html_escape(text, quote=False)
+
+    try:
+        custom_type = getattr(MessageEntity, "CUSTOM_EMOJI", "custom_emoji")
+    except Exception:
+        custom_type = "custom_emoji"
+
+    # Normalize entities to (offset, length, open_tag, close_tag)
+    spans = []
+    for e in entities:
+        etype = getattr(e, "type", e.get("type") if isinstance(e, dict) else None)
+        if hasattr(etype, "value"):
+            etype_val = etype.value
+        else:
+            etype_val = str(etype) if etype is not None else ""
+        etype_str = etype_val if isinstance(etype_val, str) else str(etype_val)
+
+        if isinstance(e, dict):
+            offset = int(e.get("offset", 0))
+            length = int(e.get("length", 0))
+            url = e.get("url")
+            custom_emoji_id = e.get("custom_emoji_id")
+            language = e.get("language")
+        else:
+            offset = int(e.offset)
+            length = int(e.length)
+            url = getattr(e, "url", None)
+            custom_emoji_id = getattr(e, "custom_emoji_id", None)
+            language = getattr(e, "language", None)
+
+        is_custom = (
+            etype == custom_type
+            or etype_str in ("custom_emoji", "MessageEntityType.CUSTOM_EMOJI")
+            or "custom_emoji" in etype_str.lower()
+        )
+        open_tag = close_tag = ""
+        if is_custom and custom_emoji_id:
+            # Fallback char inside tag — Telegram requires non-empty body
+            open_tag = f'<tg-emoji emoji-id="{custom_emoji_id}">'
+            close_tag = "</tg-emoji>"
+        elif etype_str in ("bold", "MessageEntityType.BOLD") or etype == getattr(MessageEntity, "BOLD", "bold"):
+            open_tag, close_tag = "<b>", "</b>"
+        elif etype_str in ("italic", "MessageEntityType.ITALIC") or etype == getattr(MessageEntity, "ITALIC", "italic"):
+            open_tag, close_tag = "<i>", "</i>"
+        elif etype_str in ("underline", "MessageEntityType.UNDERLINE") or etype == getattr(MessageEntity, "UNDERLINE", "underline"):
+            open_tag, close_tag = "<u>", "</u>"
+        elif etype_str in ("strikethrough", "MessageEntityType.STRIKETHROUGH") or etype == getattr(MessageEntity, "STRIKETHROUGH", "strikethrough"):
+            open_tag, close_tag = "<s>", "</s>"
+        elif etype_str in ("code", "MessageEntityType.CODE") or etype == getattr(MessageEntity, "CODE", "code"):
+            open_tag, close_tag = "<code>", "</code>"
+        elif etype_str in ("pre", "MessageEntityType.PRE") or etype == getattr(MessageEntity, "PRE", "pre"):
+            lang = f' class="language-{html_escape(language)}"' if language else ""
+            open_tag, close_tag = f"<pre{lang}>", "</pre>"
+        elif etype_str in ("text_link", "MessageEntityType.TEXT_LINK") or etype == getattr(MessageEntity, "TEXT_LINK", "text_link"):
+            if url:
+                open_tag = f'<a href="{html_escape(url, quote=True)}">'
+                close_tag = "</a>"
+        elif etype_str in ("spoiler", "MessageEntityType.SPOILER") or etype == getattr(MessageEntity, "SPOILER", "spoiler"):
+            open_tag, close_tag = '<span class="tg-spoiler">', "</span>"
+
+        if open_tag:
+            spans.append((offset, length, open_tag, close_tag))
+
+    if not spans:
+        return html_escape(text, quote=False)
+
+    # Sort by offset, then longer first (outer tags first for nesting)
+    spans.sort(key=lambda x: (x[0], -x[1]))
+
+    # Event-based open/close (handles nesting for non-overlapping / nested entities)
+    events = []  # (utf16_pos, is_close, order, tag)
+    for i, (offset, length, open_tag, close_tag) in enumerate(spans):
+        events.append((offset, 0, i, open_tag))           # open
+        events.append((offset + length, 1, -i, close_tag))  # close (inner first)
+    events.sort(key=lambda x: (x[0], x[1], x[2]))
+
+    parts: list[str] = []
+    cursor = 0  # UTF-16 cursor
+    total_u16 = _utf16_len(text)
+
+    def take(u16_from: int, u16_to: int) -> str:
+        return html_escape(_utf16_slice(text, u16_from, u16_to - u16_from), quote=False)
+
+    for pos, is_close, _order, tag in events:
+        pos = max(0, min(pos, total_u16))
+        if pos > cursor:
+            parts.append(take(cursor, pos))
+            cursor = pos
+        parts.append(tag)
+    if cursor < total_u16:
+        parts.append(take(cursor, total_u16))
+
+    return "".join(parts)
+
+
 def _message_to_html(message) -> str:
     """
     Convert a Telegram message (with entities) to safe HTML string.
 
     Supports premium custom emoji mixed with bold/italic/links/text:
       <tg-emoji emoji-id="...">fallback</tg-emoji>
-    Uses PTB's official parser (UTF-16 offsets + nested entities).
+    Uses PTB's official parser (UTF-16 offsets + nested entities),
+    then a manual entities→HTML rebuild so premium emoji is never lost.
     """
     if not message:
         return ""
@@ -4507,20 +4671,43 @@ def _message_to_html(message) -> str:
     from html import escape as html_escape
     from telegram import Message
 
+    text = message.text if message.text is not None else (message.caption or "")
+    entities = list(message.entities or []) if message.text is not None else list(message.caption_entities or [])
+
     try:
         # Prefer PTB property (custom emoji supported since PTB 20.3)
         if message.text is not None:
             html = message.text_html
-            if html is not None:
+            if html is not None and html != "":
+                # If message has custom emoji but HTML lost them, rebuild
+                if entities and "tg-emoji" not in html and any(
+                    "custom_emoji" in str(getattr(e, "type", "")).lower()
+                    or getattr(e, "custom_emoji_id", None)
+                    for e in entities
+                ):
+                    return _entities_to_html(text, entities)
                 return html
         if message.caption is not None:
             html = message.caption_html
-            if html is not None:
+            if html is not None and html != "":
+                if entities and "tg-emoji" not in html and any(
+                    "custom_emoji" in str(getattr(e, "type", "")).lower()
+                    or getattr(e, "custom_emoji_id", None)
+                    for e in entities
+                ):
+                    return _entities_to_html(text, entities)
                 return html
     except Exception as e:
-        logger.warning(f"_message_to_html: text_html failed ({e}); trying _parse_html")
+        logger.warning(f"_message_to_html: text_html failed ({e}); trying entities rebuild")
 
-    # Explicit parse path (same engine, more control)
+    # Manual rebuild from entities (preserves premium custom emoji)
+    if text and entities:
+        try:
+            return _entities_to_html(text, entities)
+        except Exception as e:
+            logger.warning(f"_message_to_html: entities rebuild failed ({e})")
+
+    # Explicit PTB parse path
     try:
         if message.text is not None:
             html = Message._parse_html(message.text, message.parse_entities(), urled=False)
@@ -4535,7 +4722,6 @@ def _message_to_html(message) -> str:
     except Exception as e:
         logger.warning(f"_message_to_html: _parse_html failed ({e}); plain escape")
 
-    text = message.text or message.caption or ""
     return html_escape(text, quote=False) if text else ""
 
 
@@ -4647,6 +4833,7 @@ def description_to_html(stored: str | None) -> str:
 
     Supports:
       - v2 rich pack (premium emoji + text + bold/italic)
+      - rebuilds <tg-emoji> from stored entities if HTML lost premium tags
       - legacy pure HTML from text_html
       - plain text (escaped)
     Never returns raw JSON to the user.
@@ -4655,9 +4842,24 @@ def description_to_html(stored: str | None) -> str:
         return ""
     rich = unpack_rich_message(stored)
     html = (rich.get("html") or "").strip()
+    text = (rich.get("text") or "").strip()
+    entities = rich.get("entities") or []
+
+    # Prefer HTML when it already has premium tags, or when no entities to rebuild
+    if html and ("tg-emoji" in html or not entities):
+        return html
+
+    # Rebuild from entities so premium custom emoji always render with text
+    if text and entities:
+        try:
+            rebuilt = _entities_to_html(text, entities)
+            if rebuilt:
+                return rebuilt
+        except Exception as e:
+            logger.warning(f"description_to_html: entities rebuild failed ({e})")
+
     if html:
         return html
-    text = (rich.get("text") or "").strip()
     if text:
         from html import escape as html_escape
         return html_escape(text, quote=False)

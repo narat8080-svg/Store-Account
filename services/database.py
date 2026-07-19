@@ -591,6 +591,7 @@ def refund_order(conn, order_id):
 
 # === ENHANCED USERS ===
 def get_users_with_stats(conn, limit=50):
+    """Newest users first so admin Refresh shows newly registered accounts on page 1."""
     s = _get_supabase()
     r = s.table('users').select('*').order('created_at', desc=True).limit(limit).execute()
     users = _rows(r.data)
@@ -598,7 +599,8 @@ def get_users_with_stats(conn, limit=50):
         or_ = s.table('orders').select('amount').eq('user_id', u['user_id']).execute()
         u['total_spent'] = sum(float(o.get('amount',0)) for o in (or_.data or []))
         u['order_count'] = len(or_.data) if or_.data else 0
-    return sorted(users, key=lambda x: -x['total_spent'])
+    # Keep newest-first order (do not re-sort by spending)
+    return users
 
 def set_user_vip(conn, user_id, tier, discount_pct=0):
     _get_supabase().table('users').update({'vip_tier': tier, 'discount_percent': discount_pct}).eq('user_id', user_id).execute()

@@ -351,6 +351,88 @@ def _safe_premium_id(key: str) -> str | None:
         return None
 
 
+async def _edit_html_or_rich(
+    query,
+    context: ContextTypes.DEFAULT_TYPE,
+    html_text: str,
+    *,
+    prod_description: str = "",
+    reply_markup=None,
+    log_tag: str = "edit",
+) -> bool:
+    """
+    Edit a message with HTML (supports premium <tg-emoji> in product + description).
+
+    Fallback order:
+      1) edit with parse_mode=HTML (premium emoji as <tg-emoji>)
+      2) if description has entities, send description via entities then header HTML
+      3) delete + send HTML fresh
+    Returns True if something was shown successfully.
+    """
+    # 1) HTML edit — preserves premium emoji in description when packed correctly
+    try:
+        await query.edit_message_text(
+            html_text, parse_mode="HTML", reply_markup=reply_markup
+        )
+        return True
+    except Exception as e:
+        logger.warning(f"{log_tag}: HTML edit failed ({e})")
+
+    # 2) Entities path for description (best fidelity for premium custom emoji)
+    try:
+        from admin import unpack_rich_message, _build_entities, send_rich_message
+        rich = unpack_rich_message(prod_description) if prod_description else {}
+        ents = _build_entities(rich.get("entities") or [])
+        plain = (rich.get("text") or "").strip()
+        if ents and plain:
+            # Header without description body — show desc as separate rich message
+            import re
+            # Drop description line(s) roughly; keep price/stock/qty
+            header = re.sub(
+                r"\n(?:📝|<tg-emoji[^>]*>[^<]*</tg-emoji>)\s*.*?(?=\n(?:💰|<tg-emoji|📦|<b>Price|Price:|Available|Stock))",
+                "",
+                html_text,
+                count=1,
+                flags=re.DOTALL | re.IGNORECASE,
+            )
+            try:
+                await query.edit_message_text(
+                    header, parse_mode="HTML", reply_markup=reply_markup
+                )
+            except Exception:
+                await context.bot.send_message(
+                    chat_id=query.message.chat_id,
+                    text=header,
+                    parse_mode="HTML",
+                    reply_markup=reply_markup,
+                )
+            await send_rich_message(
+                context.bot,
+                query.message.chat_id,
+                rich,
+            )
+            return True
+    except Exception as e:
+        logger.warning(f"{log_tag}: rich description fallback failed ({e})")
+
+    # 3) Fresh HTML send
+    try:
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=html_text,
+            parse_mode="HTML",
+            reply_markup=reply_markup,
+        )
+        return True
+    except Exception as e:
+        logger.warning(f"{log_tag}: fresh HTML send failed ({e})")
+        return False
+
+
 def _get_button_style(key: str, stock_count: int = None) -> str | None:
     """
     Get button style from button_config.json with hardcoded stock fallbacks.
@@ -933,13 +1015,14 @@ async def product_categories(update: Update, context: ContextTypes.DEFAULT_TYPE)
     for p in products:
         stock = p.get("stock_count", 0)
         is_unlimited = p.get("is_unlimited", 0)
+        # Always show stock on product buttons
         if is_unlimited:
-            stock_label = ""
-            out_label = ""
+            stock_label = " | Stock: ∞"
+        elif stock == 0:
+            stock_label = " | Out of Stock"
         else:
-            stock_label = f" ({stock} left)" if 0 < stock <= 3 else ""
-            out_label = " Out of Stock" if stock == 0 else ""
-        name_part = f"{p['name']} — ${p['price']:.2f}{stock_label}{out_label}"
+            stock_label = f" | Stock: {stock}"
+        name_part = f"{p['name']} — ${p['price']:.2f}{stock_label}"
         pid = emoji_premium_id(p['emoji'])
         icon_id = str(pid) if pid else None
         if pid:
@@ -953,7 +1036,9 @@ async def product_categories(update: Update, context: ContextTypes.DEFAULT_TYPE)
     buttons.append([_make_smart_button("Back", "menu_start", "back")])
 
     await query.edit_message_text(
-        f"{E('product')} <b>Products</b>\n\nTap a product to buy:",
+        f"{E('product')} <b>Products</b>\n\n"
+        f"Tap a product to buy:\n"
+        f"<i>Stock is shown next to each product.</i>",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(buttons),
     )
@@ -1008,14 +1093,15 @@ async def buy_detail(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     context.user_data["buy_state"] = "buy_custom_qty"
     context.user_data["buy_data"] = {"prod_id": prod_id}
 
-    max_line = "♾️ Unlimited" if is_unlimited else f"<b>{max_stock}</b>"
+    stock_emoji = E("unlimited") if is_unlimited else E("stock_label")
+    max_line = f"{stock_emoji} <b>Unlimited</b>" if is_unlimited else f"{E('stock_label')} <b>{max_stock}</b>"
     # Rich description: premium emoji + text (v2 pack or legacy HTML)
     desc = description_to_html(prod.get("description") or "")
     desc_text = f"\n{E('description')} {desc}" if desc else ""
     text = (
         f"{emoji_for_html(prod['emoji'])} <b>{prod['name']}</b>{desc_text}\n"
         f"{E('price_label')} Price: <b>${prod['price']:.2f}</b> each\n"
-        f"{E('stock_label')} Available: {max_line}\n\n"
+        f"{max_line}\n\n"
         f"{E('qty_custom')} <b>Enter quantity</b>\n"
         f"<i>Type the number of items you want to buy.</i>"
     )
@@ -1023,11 +1109,14 @@ async def buy_detail(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     kb = InlineKeyboardMarkup([[
         _make_smart_button("Cancel", f"prod_cat_{prod['category_id']}", "cancel")
     ]])
-    try:
-        await query.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
-    except Exception as e:
-        # Bad entity / HTML — retry without description tags so buy flow still works
-        logger.warning(f"buy_detail HTML failed ({e}); plain fallback")
+    sent = await _edit_html_or_rich(
+        query, context, text,
+        prod_description=prod.get("description") or "",
+        reply_markup=kb,
+        log_tag="buy_detail",
+    )
+    if not sent:
+        # Last resort plain text
         import re
         clean = re.sub(r"<[^>]+>", "", text)
         try:
@@ -2175,7 +2264,7 @@ async def _route_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, da
         await admin_del_promo_confirm(update, context)
 
     # --- Admin Users ---
-    elif data == "admin_users" or data.startswith("admin_users_p"):
+    elif data in ("admin_users", "admin_users_refresh") or data.startswith("admin_users_p"):
         await admin_users(update, context)
     elif data == "admin_list_users" or data.startswith("admin_list_users_p"):
         await admin_list_users(update, context)
@@ -2422,9 +2511,26 @@ async def _send_pay_options(chat_id: int, context: ContextTypes.DEFAULT_TYPE,
     # Rich description: premium emoji + text (v2 pack or legacy HTML)
     desc = description_to_html(prod.get("description") or "")
     desc_text = f"\n{E('description')} {desc}" if desc else ""
+    # Always show live stock on pay options too
+    is_unl = prod.get("is_unlimited", 0)
+    stock_n = prod.get("stock_count")
+    if stock_n is None and not is_unl:
+        try:
+            conn = get_db()
+            try:
+                stock_n = len(get_stock_for_product(conn, prod_id, unsold_only=True))
+            finally:
+                conn.close()
+        except Exception:
+            stock_n = 0
+    if is_unl:
+        stock_line = f"{E('stock_label')} Stock: <b>Unlimited</b>\n"
+    else:
+        stock_line = f"{E('stock_label')} Stock: <b>{stock_n if stock_n is not None else 0}</b>\n"
 
     text = (
         f"{emoji_for_html(prod['emoji'])} <b>{prod['name']}</b>{desc_text}\n\n"
+        f"{stock_line}"
         f"{E('qty_custom')} Quantity: <b>{qty}</b>\n"
         f"{E('price_label')} Unit: <b>${unit_price:.2f}</b>{promo_note}\n"
         f"{E('price_label')} Total: <b>${total:.2f}</b>\n\n"
@@ -2446,10 +2552,13 @@ async def _send_pay_options(chat_id: int, context: ContextTypes.DEFAULT_TYPE,
 
     markup = InlineKeyboardMarkup(keyboard)
     if edit_query is not None:
-        try:
-            await edit_query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
-        except Exception as e:
-            logger.warning(f"_send_pay_options HTML edit failed ({e}); plain fallback")
+        ok = await _edit_html_or_rich(
+            edit_query, context, text,
+            prod_description=prod.get("description") or "",
+            reply_markup=markup,
+            log_tag="_send_pay_options",
+        )
+        if not ok:
             import re
             clean = re.sub(r"<[^>]+>", "", text)
             try:
