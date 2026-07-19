@@ -51,6 +51,7 @@ from services.khqrpay import create_aba_qr, verify_aba_payment, get_khqrpay_conf
 from admin import (
     unpack_rich_message,
     send_rich_message,
+    description_to_html,
     admin_panel,
     admin_dashboard,
     admin_categories,
@@ -1008,9 +1009,8 @@ async def buy_detail(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     context.user_data["buy_data"] = {"prod_id": prod_id}
 
     max_line = "♾️ Unlimited" if is_unlimited else f"<b>{max_stock}</b>"
-    desc = (prod.get("description") or "").strip()
-    # Description is stored as HTML (may include <tg-emoji>); do not wrap in <i>
-    # so nested tags / premium emoji stay valid for Telegram parse_mode=HTML.
+    # Rich description: premium emoji + text (v2 pack or legacy HTML)
+    desc = description_to_html(prod.get("description") or "")
     desc_text = f"\n{E('description')} {desc}" if desc else ""
     text = (
         f"{emoji_for_html(prod['emoji'])} <b>{prod['name']}</b>{desc_text}\n"
@@ -1020,13 +1020,22 @@ async def buy_detail(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         f"<i>Type the number of items you want to buy.</i>"
     )
 
-    await query.edit_message_text(
-        text,
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup([[
-            _make_smart_button("Cancel", f"prod_cat_{prod['category_id']}", "cancel")
-        ]]),
-    )
+    kb = InlineKeyboardMarkup([[
+        _make_smart_button("Cancel", f"prod_cat_{prod['category_id']}", "cancel")
+    ]])
+    try:
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
+    except Exception as e:
+        # Bad entity / HTML — retry without description tags so buy flow still works
+        logger.warning(f"buy_detail HTML failed ({e}); plain fallback")
+        import re
+        clean = re.sub(r"<[^>]+>", "", text)
+        try:
+            await query.edit_message_text(clean, reply_markup=kb)
+        except Exception:
+            await context.bot.send_message(
+                chat_id=query.message.chat_id, text=clean, reply_markup=kb
+            )
 
 
 def _parse_pay_cb(data: str, prefix: str) -> tuple[int, int, int | None]:
@@ -2410,8 +2419,8 @@ async def _send_pay_options(chat_id: int, context: ContextTypes.DEFAULT_TYPE,
         )
 
     total = unit_price * qty
-    desc = (prod.get("description") or "").strip()
-    # Description already HTML (premium emoji etc.) — insert as-is, no extra <i> wrap
+    # Rich description: premium emoji + text (v2 pack or legacy HTML)
+    desc = description_to_html(prod.get("description") or "")
     desc_text = f"\n{E('description')} {desc}" if desc else ""
 
     text = (
@@ -2437,11 +2446,30 @@ async def _send_pay_options(chat_id: int, context: ContextTypes.DEFAULT_TYPE,
 
     markup = InlineKeyboardMarkup(keyboard)
     if edit_query is not None:
-        await edit_query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+        try:
+            await edit_query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+        except Exception as e:
+            logger.warning(f"_send_pay_options HTML edit failed ({e}); plain fallback")
+            import re
+            clean = re.sub(r"<[^>]+>", "", text)
+            try:
+                await edit_query.edit_message_text(clean, reply_markup=markup)
+            except Exception:
+                await context.bot.send_message(
+                    chat_id=chat_id, text=clean, reply_markup=markup,
+                )
     else:
-        await context.bot.send_message(
-            chat_id=chat_id, text=text, parse_mode="HTML", reply_markup=markup,
-        )
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id, text=text, parse_mode="HTML", reply_markup=markup,
+            )
+        except Exception as e:
+            logger.warning(f"_send_pay_options HTML send failed ({e}); plain fallback")
+            import re
+            clean = re.sub(r"<[^>]+>", "", text)
+            await context.bot.send_message(
+                chat_id=chat_id, text=clean, reply_markup=markup,
+            )
 
 
 async def _handle_custom_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

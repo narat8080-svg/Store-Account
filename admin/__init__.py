@@ -1219,7 +1219,12 @@ async def admin_edit_prod_field(update: Update, context: ContextTypes.DEFAULT_TY
         "name": "Send the <b>new name</b>:",
         "price": "Send the <b>new price</b> (number only):",
         "emoji": "Send the <b>new emoji</b>:",
-        "desc": "Send the <b>new description</b> (supports formatting + premium emoji):\n<i>Use Ctrl+B, Ctrl+I, Ctrl+U for formatting</i>",
+        "desc": (
+            "Send the <b>new description</b>:\n\n"
+            "• Premium emoji + normal text together ✅\n"
+            "• <b>Bold</b>, <i>Italic</i>, <u>Underline</u>, <code>Code</code>\n"
+            "• Type text and insert premium emoji from Telegram’s emoji panel"
+        ),
         "cat": "Send the <b>new category ID</b>:",
     }
     prompt = prompts.get(field, "Send the new value:")
@@ -3594,21 +3599,26 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         context.user_data["admin_state"] = "prod_desc"
         await update.message.reply_html(
             f"✅ Emoji set!\n\n"
-            f"Now send a <b>description</b> for this product (Step 4/4):\n"
-            f"<i>Example: Premium account with 5TB storage, 18 months validity.</i>\n\n"
-            f"<b>Formatting:</b> <b>Bold</b>, <i>Italic</i>, <code>Code</code>, premium emoji supported.\n"
+            f"Now send a <b>description</b> for this product (Step 4/4):\n\n"
+            f"• Premium emoji + normal text together ✅\n"
+            f"• <b>Bold</b>, <i>Italic</i>, <u>Underline</u>, <code>Code</code>\n"
+            f"• Example: send premium emoji then type your text\n\n"
             f"Send <b>/skip</b> to skip.",
             reply_markup=_cancel_button("admin_products"),
         )
 
     # --- Product Description ---
     elif state == "prod_desc":
-        # Capture rich formatting + premium emoji mixed with text (via text_html)
-        raw_text = (update.message.text or "").strip()
+        # Full rich capture: premium emoji + text + formatting (v2 pack)
+        raw_text = (
+            (update.message.text if update.message.text is not None else update.message.caption)
+            or ""
+        ).strip()
         if raw_text.lower() == "/skip":
             desc = ""
         else:
-            desc = _message_to_html(update.message) if update.message.text else ""
+            desc = capture_rich_description(update.message)
+
         cat_id = data.get("cat_id")
         name = data.get("name", "Product")
         price = data.get("price", 0)
@@ -3623,15 +3633,34 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         context.user_data.pop("admin_state", None)
         context.user_data.pop("admin_data", None)
 
-        # desc is already HTML (may include <tg-emoji>); insert as-is under parse_mode=HTML
-        await update.message.reply_html(
-            f"✅ Product created!\n\n{emoji_for_html(emoji)} <b>{name}</b> — ${price:.2f}"
-            + (f"\n📝 {desc}" if desc else ""),
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("📦 Back to Products", callback_data="admin_products"),
-                InlineKeyboardButton("🏠 Admin Panel", callback_data="admin_panel"),
-            ]]),
-        )
+        desc_html = description_to_html(desc)
+        back_kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("📦 Back to Products", callback_data="admin_products"),
+            InlineKeyboardButton("🏠 Admin Panel", callback_data="admin_panel"),
+        ]])
+        header = f"✅ Product created!\n\n{emoji_for_html(emoji)} <b>{name}</b> — ${price:.2f}"
+        try:
+            await update.message.reply_html(
+                header + (f"\n📝 {desc_html}" if desc_html else ""),
+                reply_markup=back_kb,
+            )
+        except Exception as e:
+            logger.warning(f"prod_desc confirm HTML failed: {e}")
+            await update.message.reply_text(
+                f"✅ Product created!\n\n{name} — ${price:.2f}",
+                reply_markup=back_kb,
+            )
+            # Separate preview so premium emoji still visible to admin
+            if desc:
+                try:
+                    await send_rich_message(
+                        context.bot,
+                        update.effective_chat.id,
+                        unpack_rich_message(desc),
+                        reply_to_message=update.message,
+                    )
+                except Exception:
+                    pass
 
     # --- Stock Account ---
     elif state == "stock_account":
@@ -3853,14 +3882,20 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     elif state == "prod_edit_value":
         prod_id = data.get("edit_prod_id")
         field = data.get("edit_prod_field")
+        msg = update.message
         # Description may be premium-emoji-only (still non-empty text from Telegram)
         if field != "desc" and not text:
             await update.message.reply_html("❌ Cannot be empty.", reply_markup=_cancel_button("admin_products"))
             return
-        if field == "desc" and not (update.message.text or "").strip():
-            await update.message.reply_html("❌ Cannot be empty.", reply_markup=_cancel_button("admin_products"))
+        desc_body = (msg.text if msg.text is not None else msg.caption) or ""
+        if field == "desc" and not desc_body.strip():
+            await update.message.reply_html(
+                "❌ Description cannot be empty. Send text and/or premium emoji.",
+                reply_markup=_cancel_button("admin_products"),
+            )
             return
 
+        saved_desc = ""
         conn = get_db()
         try:
             if field == "name":
@@ -3870,8 +3905,9 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             elif field == "emoji":
                 update_product(conn, prod_id, emoji=_extract_emoji(update.message))
             elif field == "desc":
-                # Premium emoji + bold/italic + text → correct HTML via text_html
-                update_product(conn, prod_id, description=_message_to_html(update.message))
+                # Premium emoji + bold/italic + text → v2 rich pack
+                saved_desc = capture_rich_description(msg)
+                update_product(conn, prod_id, description=saved_desc)
             elif field == "cat":
                 update_product(conn, prod_id, category_id=int(text))
         except (ValueError, TypeError):
@@ -3883,19 +3919,33 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         context.user_data.pop("admin_state", None)
         context.user_data.pop("admin_data", None)
 
-        # Preview saved description so admin can verify premium emoji rendered
-        preview = ""
+        back_kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("📦 Back to Products", callback_data="admin_products"),
+        ]])
         if field == "desc":
-            saved = _message_to_html(update.message)
-            if saved:
-                preview = f"\n\n📝 {saved}"
-
-        await update.message.reply_html(
-            f"✅ Product updated!{preview}",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("📦 Back to Products", callback_data="admin_products"),
-            ]]),
-        )
+            desc_html = description_to_html(saved_desc)
+            try:
+                await update.message.reply_html(
+                    f"✅ Description updated!\n\n📝 {desc_html}",
+                    reply_markup=back_kb,
+                )
+            except Exception as e:
+                logger.warning(f"prod_edit desc confirm HTML failed: {e}")
+                await update.message.reply_html("✅ Description updated!", reply_markup=back_kb)
+                try:
+                    await send_rich_message(
+                        context.bot,
+                        update.effective_chat.id,
+                        unpack_rich_message(saved_desc),
+                        reply_to_message=update.message,
+                    )
+                except Exception:
+                    pass
+        else:
+            await update.message.reply_html(
+                "✅ Product updated!",
+                reply_markup=back_kb,
+            )
 
     # --- Stock Edit Detail ---
     elif state == "stock_edit_detail":
@@ -4587,8 +4637,50 @@ def unpack_rich_message(stored: str | None) -> dict:
                 }
         except Exception:
             pass
-    # Legacy: entire string is HTML
+    # Legacy: entire string is HTML (or plain text)
     return {"text": "", "html": stored, "entities": []}
+
+
+def description_to_html(stored: str | None) -> str:
+    """
+    Product description for embedding in HTML messages (parse_mode=HTML).
+
+    Supports:
+      - v2 rich pack (premium emoji + text + bold/italic)
+      - legacy pure HTML from text_html
+      - plain text (escaped)
+    Never returns raw JSON to the user.
+    """
+    if not stored:
+        return ""
+    rich = unpack_rich_message(stored)
+    html = (rich.get("html") or "").strip()
+    if html:
+        return html
+    text = (rich.get("text") or "").strip()
+    if text:
+        from html import escape as html_escape
+        return html_escape(text, quote=False)
+    # Last resort: if unpack treated non-JSON as html and it was empty
+    s = str(stored).strip()
+    if s.startswith("{") and '"v"' in s[:30]:
+        return ""
+    return s
+
+
+def capture_rich_description(message) -> str:
+    """
+    Capture product description from admin message.
+    Stores v2 JSON so premium custom emoji mixed with text is preserved.
+    """
+    if not message:
+        return ""
+    raw = (message.text if message.text is not None else message.caption) or ""
+    if raw.strip().lower() == "/skip":
+        return ""
+    if not raw.strip() and not (message.entities or message.caption_entities):
+        return ""
+    return pack_rich_message(message)
 
 
 async def send_rich_message(
