@@ -710,8 +710,11 @@ async def admin_stock_limited_start(update: Update, context: ContextTypes.DEFAUL
         f"📥 <b>Add Limited Stock — {prod_name}</b>\n\n"
         f"<b>Option 1:</b> Type/paste accounts below\n"
         f"<b>Option 2:</b> Upload a .txt file with accounts\n\n"
-        f"<i>Format: email:password</i>\n"
-        f"<i>One account per line (Gmail, Outlook, etc.)</i>",
+        f"<b>Format:</b> <code>email:password</code>\n"
+        f"<b>Rule:</b> <b>1 line = 1 account</b>\n\n"
+        f"<i>Each line is stored as its own stock item. When a user orders, "
+        f"that exact account is reserved for them only — another buyer "
+        f"cannot receive the same account.</i>",
         parse_mode="HTML",
         reply_markup=_cancel_button("admin_stock_menu"),
     )
@@ -1415,8 +1418,10 @@ async def admin_editstock_replace_start(update: Update, context: ContextTypes.DE
         f"Product: {emoji_for_html(prod['emoji'])} {prod['name']}\n"
         f"Current unsold: <b>{count}</b>\n\n"
         f"⚠️ All existing unsold items will be <b>deleted</b>.\n"
-        f"<b>Option 1:</b> Send accounts as text (one per line)\n"
-        f"<b>Option 2:</b> Upload a .txt file",
+        f"<b>Option 1:</b> Send accounts as text\n"
+        f"<b>Option 2:</b> Upload a .txt file\n\n"
+        f"<b>Rule:</b> <b>1 line = 1 account</b> "
+        f"(each line is reserved exclusively for one order).",
         parse_mode="HTML", reply_markup=_cancel_button("admin_stock_menu")
     )
 
@@ -2267,13 +2272,14 @@ async def admin_broadcast_start(update: Update, context: ContextTypes.DEFAULT_TY
 
     await query.edit_message_text(
         "📢 <b>Compose Broadcast</b>\n\n"
-        "Send the message or media you want to broadcast.\n\n"
-        "📝 <b>Text</b> — with HTML formatting + premium emojis\n"
-        "🖼 <b>Photo</b> — with caption\n"
+        "Send the exact message users should receive.\n\n"
+        "📝 <b>Text</b> — formatting + <b>premium emoji mixed with text</b>\n"
+        "🖼 <b>Photo</b> — with caption (premium emoji OK)\n"
         "🎬 <b>Video</b> — with caption\n"
         "🎤 <b>Voice</b> — audio message\n"
         "📄 <b>Document / GIF</b> — with caption\n\n"
-        "<i>This will be sent to ALL active users.</i>",
+        "✅ Users only see <b>your message</b> (no “Broadcast” label).\n"
+        "<i>Sent to ALL active users.</i>",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([[
             InlineKeyboardButton("❌ Cancel", callback_data="admin_broadcast")
@@ -2750,13 +2756,12 @@ async def admin_settings_welcome(update: Update, context: ContextTypes.DEFAULT_T
 
     await query.edit_message_text(
         "📝 <b>Edit Welcome Message</b>\n\n"
-        "Send the new welcome message:\n\n"
+        "Send the new welcome message (supports <b>premium emoji + text together</b>):\n\n"
         "📝 <b>Text only</b> — with formatting:\n"
         "• <b>Bold</b> (Ctrl+B), <i>Italic</i> (Ctrl+I), <u>Underline</u> (Ctrl+U)\n"
-        "• <s>Strikethrough</s> (Ctrl+Shift+X), <code>Code</code> (Ctrl+Shift+M)\n"
-        '• Quote, <pre>Code Block</pre>, premium emojis\n\n'
-        "🖼 <b>Photo + Caption</b> — send a photo with caption text\n"
-        "  The caption supports the same formatting as above.\n\n"
+        "• <s>Strikethrough</s>, <code>Code</code>, links, quotes\n"
+        "• Premium animated emoji anywhere in the text\n\n"
+        "🖼 <b>Photo + Caption</b> — photo with caption (same formatting + premium emoji)\n\n"
         "<i>Send /default to reset to default.</i>",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([[
@@ -3686,9 +3691,11 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             restock_note = f"\n🔕 <i>Restock alerts are OFF (Settings).</i>"
 
         await update.message.reply_html(
-            f"{eget('success')} <b>{len(lines)} stock item(s)</b> added to "
+            f"{eget('success')} <b>{len(lines)} account(s)</b> added to "
             f"{emoji_for_html(prod['emoji'])} {prod['name']}!\n"
-            f"{eget('stock_label')} Total stock: <b>{stock}</b>{restock_note}",
+            f"{eget('stock_label')} Total stock: <b>{stock}</b>\n"
+            f"🔒 <i>1 line = 1 reserved account per order (no mix-ups).</i>"
+            f"{restock_note}",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("📥 Add More Stock", callback_data="admin_add_stock"),
                 InlineKeyboardButton("🏠 Admin Panel", callback_data="admin_panel"),
@@ -4030,15 +4037,26 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     # --- User DM ---
     elif state == "user_dm":
         uid = data.get("user_id")
+        msg = update.message
+        # Exact copy preserves premium emoji + text (no extra "Admin" wrapper)
         try:
-            await context.bot.send_message(
+            await context.bot.copy_message(
                 chat_id=uid,
-                text=f"📩 <b>Message from Admin:</b>\n\n{text}",
-                parse_mode="HTML",
+                from_chat_id=msg.chat_id,
+                message_id=msg.message_id,
             )
             success = True
         except Exception:
-            success = False
+            # Fallback: rich HTML if copy fails
+            try:
+                await context.bot.send_message(
+                    chat_id=uid,
+                    text=_message_to_html(msg) or text,
+                    parse_mode="HTML",
+                )
+                success = True
+            except Exception:
+                success = False
 
         context.user_data.pop("admin_state", None)
         context.user_data.pop("admin_data", None)
@@ -4160,87 +4178,43 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         success = 0
         failed = 0
 
-        # ── Detect message type ──
-        if msg.video:
-            # Video broadcast
-            for u in users:
-                try:
-                    await context.bot.send_video(
-                        chat_id=u["user_id"],
-                        video=msg.video.file_id,
-                        caption=_message_to_html(msg) if msg.caption else None,
-                        parse_mode="HTML" if msg.caption else None,
-                    )
-                    success += 1
-                except Exception:
-                    failed += 1
-
-        elif msg.voice:
-            # Voice broadcast
-            for u in users:
-                try:
-                    await context.bot.send_voice(
-                        chat_id=u["user_id"],
-                        voice=msg.voice.file_id,
-                        caption=_message_to_html(msg) if msg.caption else None,
-                        parse_mode="HTML" if msg.caption else None,
-                    )
-                    success += 1
-                except Exception:
-                    failed += 1
-
-        elif msg.photo:
-            # Photo broadcast
-            for u in users:
-                try:
-                    await context.bot.send_photo(
-                        chat_id=u["user_id"],
-                        photo=msg.photo[-1].file_id,
-                        caption=_message_to_html(msg) if msg.caption else None,
-                        parse_mode="HTML" if msg.caption else None,
-                    )
-                    success += 1
-                except Exception:
-                    failed += 1
-
-        elif msg.document or msg.animation:
-            # Document / GIF broadcast
-            file_id = msg.document.file_id if msg.document else msg.animation.file_id
-            for u in users:
-                try:
-                    await context.bot.send_document(
-                        chat_id=u["user_id"],
-                        document=file_id,
-                        caption=_message_to_html(msg) if msg.caption else None,
-                        parse_mode="HTML" if msg.caption else None,
-                    )
-                    success += 1
-                except Exception:
-                    failed += 1
-
-        else:
-            # Text broadcast (with premium emoji support)
-            text_html = _message_to_html(msg)
-            for u in users:
-                try:
-                    await context.bot.send_message(
-                        chat_id=u["user_id"],
-                        text=f"📢 <b>Announcement</b>\n\n{text_html}",
-                        parse_mode="HTML",
-                    )
-                    success += 1
-                except Exception:
-                    failed += 1
-
-        await update.message.reply_html(
-            f"📢 <b>Broadcast Complete!</b>\n\n"
-            f"✅ Sent: <b>{success}</b>\n"
-            f"❌ Failed: <b>{failed}</b>",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("📢 Send Another", callback_data="admin_broadcast_start"),
-                InlineKeyboardButton("🔙 Admin Panel", callback_data="admin_panel"),
-            ]])
+        # copy_message = exact copy for every user:
+        # - Premium emoji + text/formatting preserved
+        # - No "Broadcast" / "Announcement" wrapper — users only see your content
+        status_msg = await update.message.reply_html(
+            f"⏳ Sending to <b>{len(users)}</b> users…"
         )
+        for u in users:
+            try:
+                await context.bot.copy_message(
+                    chat_id=u["user_id"],
+                    from_chat_id=msg.chat_id,
+                    message_id=msg.message_id,
+                )
+                success += 1
+            except Exception:
+                failed += 1
+
+        try:
+            await status_msg.edit_text(
+                f"✅ <b>Done</b>\n\n"
+                f"✅ Sent: <b>{success}</b>\n"
+                f"❌ Failed: <b>{failed}</b>\n\n"
+                f"<i>Users received only your message (no broadcast label).</i>",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("📢 Send Another", callback_data="admin_broadcast_start"),
+                    InlineKeyboardButton("🔙 Admin Panel", callback_data="admin_panel"),
+                ]]),
+            )
+        except Exception:
+            await update.message.reply_html(
+                f"✅ <b>Done</b>\n\n✅ Sent: <b>{success}</b>\n❌ Failed: <b>{failed}</b>",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("📢 Send Another", callback_data="admin_broadcast_start"),
+                    InlineKeyboardButton("🔙 Admin Panel", callback_data="admin_panel"),
+                ]]),
+            )
 
     # --- Order Search ---
     elif state == "order_search":
@@ -4299,33 +4273,53 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             )
             return
 
+        # Pack text + premium emoji + formatting (entities + HTML)
+        packed = pack_rich_message(msg)
+        rich = unpack_rich_message(packed)
+
         conn = get_db()
         try:
             if msg.photo:
-                # ── Photo welcome ──
                 photo_id = msg.photo[-1].file_id  # highest resolution
-                caption_html = _message_to_html(msg) if msg.caption else ""
                 set_bot_setting(conn, "welcome_photo", photo_id)
-                set_bot_setting(conn, "welcome_msg", caption_html)
-                await update.message.reply_html(
-                    "✅ Welcome message updated with photo!",
-                    reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("🔙 Back", callback_data="admin_settings")
-                    ]])
-                )
+                set_bot_setting(conn, "welcome_msg", packed)
+                kind = "photo + caption"
             else:
-                # ── Text-only welcome ──
-                welcome_html = _message_to_html(msg)
-                set_bot_setting(conn, "welcome_msg", welcome_html)
+                # Require some content for text-only welcome
+                if not (msg.text or msg.caption):
+                    await update.message.reply_html(
+                        "❌ Please send text (with optional premium emoji) or a photo with caption.",
+                        reply_markup=InlineKeyboardMarkup([[
+                            InlineKeyboardButton("🔙 Back", callback_data="admin_settings")
+                        ]])
+                    )
+                    return
+                set_bot_setting(conn, "welcome_msg", packed)
                 set_bot_setting(conn, "welcome_photo", "")  # clear any old photo
-                await update.message.reply_html(
-                    "✅ Welcome message updated!",
-                    reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("🔙 Back", callback_data="admin_settings")
-                    ]])
-                )
+                kind = "text"
         finally:
             conn.close()
+
+        back_kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("🔙 Back", callback_data="admin_settings")
+        ]])
+        await update.message.reply_html(
+            f"✅ Welcome message updated ({kind})!\n"
+            f"<i>Premium emoji + text are saved. Preview below:</i>",
+            reply_markup=back_kb,
+        )
+        # Live preview so admin can verify premium emoji render
+        try:
+            photo = msg.photo[-1].file_id if msg.photo else None
+            await send_rich_message(
+                context.bot,
+                update.effective_chat.id,
+                rich,
+                photo=photo,
+                reply_to_message=update.message,
+            )
+        except Exception as e:
+            logger.warning(f"welcome preview failed: {e}")
 
     # --- Button Style Set ---
     elif state == "btn_style_set":
@@ -4453,19 +4447,18 @@ def _message_to_html(message) -> str:
     """
     Convert a Telegram message (with entities) to safe HTML string.
 
-    Uses python-telegram-bot's built-in text_html / caption_html so that:
-      - Premium custom emoji → <tg-emoji emoji-id="...">…</tg-emoji>
-      - Bold/italic/code/etc. nest correctly with premium emoji
-      - Plain text is HTML-escaped (no broken tags when mixing emoji + text)
-
-    The previous hand-rolled converter broke offsets when premium emoji was
-    combined with other formatting or surrounding text.
+    Supports premium custom emoji mixed with bold/italic/links/text:
+      <tg-emoji emoji-id="...">fallback</tg-emoji>
+    Uses PTB's official parser (UTF-16 offsets + nested entities).
     """
     if not message:
         return ""
 
-    # Prefer official PTB conversion (supports nested entities + custom emoji).
+    from html import escape as html_escape
+    from telegram import Message
+
     try:
+        # Prefer PTB property (custom emoji supported since PTB 20.3)
         if message.text is not None:
             html = message.text_html
             if html is not None:
@@ -4475,12 +4468,222 @@ def _message_to_html(message) -> str:
             if html is not None:
                 return html
     except Exception as e:
-        logger.warning(f"_message_to_html: text_html failed ({e}); falling back")
+        logger.warning(f"_message_to_html: text_html failed ({e}); trying _parse_html")
 
-    # Fallback: plain escape only (no entity formatting)
-    from html import escape as html_escape
+    # Explicit parse path (same engine, more control)
+    try:
+        if message.text is not None:
+            html = Message._parse_html(message.text, message.parse_entities(), urled=False)
+            if html is not None:
+                return html
+        if message.caption is not None:
+            html = Message._parse_html(
+                message.caption, message.parse_caption_entities(), urled=False
+            )
+            if html is not None:
+                return html
+    except Exception as e:
+        logger.warning(f"_message_to_html: _parse_html failed ({e}); plain escape")
+
     text = message.text or message.caption or ""
     return html_escape(text, quote=False) if text else ""
+
+
+def _serialize_entities(entities) -> list:
+    """Serialize MessageEntity list for DB storage (premium emoji + formatting)."""
+    out = []
+    for e in entities or []:
+        etype = e.type
+        if hasattr(etype, "value"):
+            etype = etype.value
+        item = {
+            "type": str(etype),
+            "offset": int(e.offset),
+            "length": int(e.length),
+        }
+        if getattr(e, "url", None):
+            item["url"] = e.url
+        if getattr(e, "language", None):
+            item["language"] = e.language
+        if getattr(e, "custom_emoji_id", None):
+            item["custom_emoji_id"] = str(e.custom_emoji_id)
+        # text_mention user id (rare in welcome/broadcast)
+        user = getattr(e, "user", None)
+        if user is not None and getattr(user, "id", None) is not None:
+            item["user"] = {"id": user.id}
+        out.append(item)
+    return out
+
+
+def _build_entities(raw_list) -> list:
+    """Rebuild MessageEntity objects from serialized list."""
+    from telegram import MessageEntity, User
+
+    built = []
+    for item in raw_list or []:
+        try:
+            kwargs = {
+                "type": item["type"],
+                "offset": int(item["offset"]),
+                "length": int(item["length"]),
+            }
+            if item.get("url"):
+                kwargs["url"] = item["url"]
+            if item.get("language"):
+                kwargs["language"] = item["language"]
+            if item.get("custom_emoji_id"):
+                kwargs["custom_emoji_id"] = str(item["custom_emoji_id"])
+            if item.get("user") and item["user"].get("id"):
+                kwargs["user"] = User(id=int(item["user"]["id"]), first_name="", is_bot=False)
+            built.append(MessageEntity(**kwargs))
+        except Exception as e:
+            logger.warning(f"_build_entities: skip entity {item}: {e}")
+    return built
+
+
+def pack_rich_message(message) -> str:
+    """
+    Pack admin message (text/caption + premium emoji + formatting) for storage.
+
+    Format v2 JSON:
+      {"v":2,"text":"...","html":"...","entities":[...]}
+    Legacy plain HTML strings still load via unpack_rich_message.
+    """
+    if not message:
+        return json.dumps({"v": 2, "text": "", "html": "", "entities": []}, ensure_ascii=False)
+
+    if message.text is not None:
+        text = message.text
+        entities = message.entities or []
+    else:
+        text = message.caption or ""
+        entities = message.caption_entities or []
+
+    payload = {
+        "v": 2,
+        "text": text,
+        "html": _message_to_html(message),
+        "entities": _serialize_entities(entities),
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def unpack_rich_message(stored: str | None) -> dict:
+    """
+    Unpack stored welcome/broadcast content.
+    Returns {text, html, entities} — works for v2 JSON and legacy HTML strings.
+    """
+    if not stored:
+        return {"text": "", "html": "", "entities": []}
+    s = stored.strip()
+    if s.startswith("{") and '"v"' in s[:30]:
+        try:
+            data = json.loads(s)
+            if isinstance(data, dict) and data.get("v") == 2:
+                return {
+                    "text": data.get("text") or "",
+                    "html": data.get("html") or "",
+                    "entities": data.get("entities") or [],
+                }
+        except Exception:
+            pass
+    # Legacy: entire string is HTML
+    return {"text": "", "html": stored, "entities": []}
+
+
+async def send_rich_message(
+    bot,
+    chat_id: int,
+    rich: dict,
+    *,
+    photo: str | None = None,
+    reply_markup=None,
+    reply_to_message=None,
+) -> None:
+    """
+    Send stored rich content with premium emoji + text.
+    Tries: entities → HTML → plain text (best fidelity first).
+    """
+    text = rich.get("text") or ""
+    html = rich.get("html") or ""
+    entities = _build_entities(rich.get("entities") or [])
+
+    # Prefer non-empty body
+    body_plain = text or _strip_html(html)
+    body_html = html or text
+
+    async def _send_photo(**kwargs):
+        if reply_to_message is not None:
+            await reply_to_message.reply_photo(**kwargs)
+        else:
+            await bot.send_photo(chat_id=chat_id, **kwargs)
+
+    async def _send_text(**kwargs):
+        if reply_to_message is not None:
+            await reply_to_message.reply_text(**kwargs)
+        else:
+            await bot.send_message(chat_id=chat_id, **kwargs)
+
+    if photo:
+        # 1) entities on caption (best for premium emoji)
+        if entities and text:
+            try:
+                await _send_photo(
+                    photo=photo,
+                    caption=text,
+                    caption_entities=entities,
+                    reply_markup=reply_markup,
+                )
+                return
+            except Exception as e:
+                logger.warning(f"send_rich_message photo+entities failed: {e}")
+        # 2) HTML caption
+        if body_html:
+            try:
+                await _send_photo(
+                    photo=photo,
+                    caption=body_html,
+                    parse_mode="HTML",
+                    reply_markup=reply_markup,
+                )
+                return
+            except Exception as e:
+                logger.warning(f"send_rich_message photo+HTML failed: {e}")
+        # 3) plain
+        await _send_photo(
+            photo=photo,
+            caption=body_plain or None,
+            reply_markup=reply_markup,
+        )
+        return
+
+    # Text-only
+    if entities and text:
+        try:
+            await _send_text(
+                text=text,
+                entities=entities,
+                reply_markup=reply_markup,
+            )
+            return
+        except Exception as e:
+            logger.warning(f"send_rich_message text+entities failed: {e}")
+    if body_html:
+        try:
+            await _send_text(
+                text=body_html,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+            )
+            return
+        except Exception as e:
+            logger.warning(f"send_rich_message text+HTML failed: {e}")
+    await _send_text(text=body_plain or " ", reply_markup=reply_markup)
+
+
+def _strip_html(html: str) -> str:
+    import re
+    return re.sub(r"<[^>]+>", "", html or "")
 
 
 def _extract_emoji_value(message) -> tuple:

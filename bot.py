@@ -35,7 +35,9 @@ from services.database import (
     create_payment,
     get_product,
     get_stock_for_product,
-    mark_stock_sold,
+    claim_stock_items,
+    release_stock_items,
+    link_stock_to_order,
     create_order,
     get_user_orders,
     get_promo_code,
@@ -47,6 +49,8 @@ from services.khqrpay import create_aba_qr, verify_aba_payment, get_khqrpay_conf
 
 # Admin imports
 from admin import (
+    unpack_rich_message,
+    send_rich_message,
     admin_panel,
     admin_dashboard,
     admin_categories,
@@ -492,54 +496,114 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     await update.message.reply_html(f"🚧 {msg}")
                 return
 
-        welcome_text = (
-            f"{E('welcome')} <b>Welcome to Rat Store!</b>\n\n"
-            "Your one-stop shop for premium digital accounts.\n"
-            "Choose an option below to get started:"
-        )
         from services.database import get_bot_setting
-        custom = get_bot_setting(conn, "welcome_msg", "")
-        welcome_photo = get_bot_setting(conn, "welcome_photo", "")
-        if custom:
-            welcome_text = custom
+        custom = get_bot_setting(conn, "welcome_msg", "") or ""
+        welcome_photo = get_bot_setting(conn, "welcome_photo", "") or ""
     finally:
         conn.close()
 
+    default_welcome = (
+        f"{E('welcome')} <b>Welcome to Rat Store!</b>\n\n"
+        "Your one-stop shop for premium digital accounts.\n"
+        "Choose an option below to get started:"
+    )
+    # Custom welcome may be v2 JSON (premium emoji + text) or legacy HTML string
+    if custom:
+        welcome_rich = unpack_rich_message(custom)
+        if not (welcome_rich.get("html") or welcome_rich.get("text")):
+            welcome_rich = {"text": "", "html": default_welcome, "entities": []}
+    else:
+        welcome_rich = {"text": "", "html": default_welcome, "entities": []}
+
+    menu = _main_menu_keyboard()
+    welcome_html = welcome_rich.get("html") or welcome_rich.get("text") or default_welcome
+
     if update.message:
         try:
-            if welcome_photo:
-                # Send photo + caption with menu buttons
-                await update.message.reply_photo(
-                    photo=welcome_photo,
-                    caption=welcome_text,
-                    parse_mode="HTML",
-                    reply_markup=_main_menu_keyboard(),
-                )
-            else:
-                await update.message.reply_html(welcome_text, reply_markup=_main_menu_keyboard())
-        except Exception:
+            await send_rich_message(
+                context.bot,
+                update.effective_chat.id,
+                welcome_rich,
+                photo=welcome_photo or None,
+                reply_markup=menu,
+                reply_to_message=update.message,
+            )
+        except Exception as e:
+            logger.warning(f"start(): rich welcome failed ({e}); plain fallback")
             import re
-            clean = re.sub(r'<[^>]+>', '', welcome_text)
-            await update.message.reply_text(clean, reply_markup=_main_menu_keyboard())
+            clean = re.sub(r"<[^>]+>", "", welcome_html)
+            await update.message.reply_text(clean, reply_markup=menu)
     elif update.callback_query and update.callback_query.message:
         query = update.callback_query
         try:
             await query.answer()
         except Exception:
             pass
-        try:
-            await query.edit_message_text(
-                welcome_text, parse_mode="HTML", reply_markup=_main_menu_keyboard()
-            )
-        except Exception as e:
-            # HTML rejected (bad entity / premium emoji id) — retry as plain text.
-            logger.warning(f"start(): HTML edit failed ({e}); retrying plain")
-            import re
-            clean = re.sub(r'<[^>]+>', '', welcome_text)
+        # Editing cannot re-attach photo easily; use HTML text (or send new message)
+        if welcome_photo:
             try:
-                await query.edit_message_text(clean, reply_markup=_main_menu_keyboard())
-            except Exception as e2:
-                logger.error(f"start(): plain edit also failed: {e2}")
+                await query.message.delete()
+            except Exception:
+                pass
+            try:
+                await send_rich_message(
+                    context.bot,
+                    query.message.chat_id,
+                    welcome_rich,
+                    photo=welcome_photo,
+                    reply_markup=menu,
+                )
+            except Exception as e:
+                logger.warning(f"start(): photo welcome re-send failed: {e}")
+                await context.bot.send_message(
+                    chat_id=query.message.chat_id,
+                    text=welcome_html,
+                    parse_mode="HTML",
+                    reply_markup=menu,
+                )
+        else:
+            edited = False
+            # Prefer entities edit (best premium-emoji fidelity)
+            try:
+                from admin import _build_entities
+                ents = _build_entities(welcome_rich.get("entities") or [])
+                plain = welcome_rich.get("text") or ""
+                if ents and plain:
+                    await query.edit_message_text(
+                        plain, entities=ents, reply_markup=menu
+                    )
+                    edited = True
+            except Exception as e:
+                logger.warning(f"start(): entities edit failed ({e})")
+            if not edited:
+                try:
+                    await query.edit_message_text(
+                        welcome_html, parse_mode="HTML", reply_markup=menu
+                    )
+                    edited = True
+                except Exception as e:
+                    logger.warning(f"start(): HTML edit failed ({e}); send fresh")
+            if not edited:
+                try:
+                    await query.message.delete()
+                except Exception:
+                    pass
+                try:
+                    await send_rich_message(
+                        context.bot,
+                        query.message.chat_id,
+                        welcome_rich,
+                        reply_markup=menu,
+                    )
+                except Exception as e2:
+                    import re
+                    clean = re.sub(r"<[^>]+>", "", welcome_html)
+                    await context.bot.send_message(
+                        chat_id=query.message.chat_id,
+                        text=clean,
+                        reply_markup=menu,
+                    )
+                    logger.error(f"start(): plain send also failed path: {e2}")
 
 
 # ===========================================================================
@@ -790,7 +854,9 @@ async def _khqrpay_watcher(
         if result.get("paid"):
             conn = get_db()
             try:
-                mark_payment_paid(conn, payment_id)
+                # Only the first successful pending→paid transition credits balance
+                if not mark_payment_paid(conn, payment_id):
+                    return
                 new_balance = add_balance(conn, user_id, amount)
             finally:
                 conn.close()
@@ -1079,10 +1145,7 @@ async def buy_execute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     try:
         prod = get_product(conn, prod_id)
         is_unlimited = prod.get("is_unlimited", 0) if prod else 0
-        if is_unlimited:
-            stock_items = []
-        else:
-            stock_items = get_stock_for_product(conn, prod_id, unsold_only=True)
+        available = 0 if is_unlimited else len(get_stock_for_product(conn, prod_id, unsold_only=True))
     finally:
         conn.close()
 
@@ -1093,7 +1156,7 @@ async def buy_execute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
 
-    if not is_unlimited and len(stock_items) < qty:
+    if not is_unlimited and available < qty:
         await query.edit_message_text(
             f"{E('out_of_stock')} <b>Out of Stock!</b>",
             parse_mode="HTML", reply_markup=_back_button("menu_product"),
@@ -1104,6 +1167,9 @@ async def buy_execute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     unit_price = price
     promo_data = None
     discount = 0
+    claimed = []
+    details = []
+    new_balance = 0.0
 
     conn = get_db()
     try:
@@ -1143,30 +1209,58 @@ async def buy_execute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             )
             return
 
-        add_balance(conn, user.id, -total_price)
-
-        # ── Assign stock items & collect details ──
-        details = []
-        if is_unlimited:
-            # Unlimited product: no stock items to assign, just create orders
-            for i in range(qty):
-                order_id = create_order(conn, user.id, prod_id, unit_price,
-                    stock_id=None,
-                    promo_code=promo_data["code"] if promo_data else None,
-                    original_amount=price,
+        # ── Atomic stock claim FIRST (1 row = 1 account, exclusive to this order)
+        # Prevents two buyers from being assigned the same account under concurrency.
+        if not is_unlimited:
+            claimed = claim_stock_items(conn, prod_id, qty)
+            if len(claimed) < qty:
+                await query.edit_message_text(
+                    f"{E('out_of_stock')} <b>Out of Stock!</b>\n\n"
+                    f"Those accounts were just taken by another buyer. Please try again.",
+                    parse_mode="HTML", reply_markup=_back_button("menu_product"),
                 )
-        else:
-            for i in range(qty):
-                item = stock_items[i]
-                details.append(item["detail"])
-                order_id = create_order(conn, user.id, prod_id, unit_price,
-                    stock_id=item["id"],
-                    promo_code=promo_data["code"] if promo_data else None,
-                    original_amount=price,
-                )
-                mark_stock_sold(conn, item["id"], order_id)
+                return
 
-        new_balance = balance - total_price
+        charged = False
+        try:
+            add_balance(conn, user.id, -total_price)
+            charged = True
+
+            # ── Create orders bound to the exact claimed stock rows ──
+            # Delivery uses only these details — never a re-fetch of "next available".
+            if is_unlimited:
+                for _ in range(qty):
+                    create_order(
+                        conn, user.id, prod_id, unit_price,
+                        stock_id=None,
+                        promo_code=promo_data["code"] if promo_data else None,
+                        original_amount=price,
+                    )
+            else:
+                for item in claimed:
+                    details.append(item["detail"])
+                    order_id = create_order(
+                        conn, user.id, prod_id, unit_price,
+                        stock_id=item["id"],
+                        promo_code=promo_data["code"] if promo_data else None,
+                        original_amount=price,
+                    )
+                    link_stock_to_order(conn, item["id"], order_id)
+
+            new_balance = balance - total_price
+        except Exception:
+            # Roll back claim + charge so no user is left with wrong/missing accounts
+            if claimed:
+                try:
+                    release_stock_items(conn, [c["id"] for c in claimed])
+                except Exception:
+                    pass
+            if charged:
+                try:
+                    add_balance(conn, user.id, total_price)
+                except Exception:
+                    pass
+            raise
     finally:
         conn.close()
 
@@ -1412,33 +1506,38 @@ async def _khqrpay_order_watcher(
         result = await verify_aba_payment(cfg["profile_id"], cfg["secret_key"], transaction_id)
         if result.get("paid"):
             conn = get_db()
+            claimed = []
+            details = []
             try:
-                mark_payment_paid(conn, payment_id)
+                # First poller to mark paid wins — blocks double delivery of accounts
+                if not mark_payment_paid(conn, payment_id):
+                    return
 
                 prod = get_product(conn, prod_id)
                 is_unlimited = prod.get("is_unlimited", 0) if prod else 0
-                stock_items = [] if is_unlimited else get_stock_for_product(conn, prod_id, unsold_only=True)
 
-                if not is_unlimited and len(stock_items) < qty:
-                    add_balance(conn, user_id, amount)
-                    try:
-                        await context.bot.edit_message_caption(
-                            chat_id=chat_id, message_id=message_id,
-                            caption=(
-                                f"{E('warning')} <b>Out of Stock After Payment</b>\n\n"
-                                f"We received your ${amount:.2f} but stock ran out. "
-                                f"Credited to your wallet."
-                            ),
-                            parse_mode="HTML",
-                        )
-                    except Exception:
-                        pass
-                    return
+                # Atomic claim: each order gets exclusive stock rows (1 line = 1 account)
+                if not is_unlimited:
+                    claimed = claim_stock_items(conn, prod_id, qty)
+                    if len(claimed) < qty:
+                        add_balance(conn, user_id, amount)
+                        try:
+                            await context.bot.edit_message_caption(
+                                chat_id=chat_id, message_id=message_id,
+                                caption=(
+                                    f"{E('warning')} <b>Out of Stock After Payment</b>\n\n"
+                                    f"We received your ${amount:.2f} but stock ran out. "
+                                    f"Credited to your wallet."
+                                ),
+                                parse_mode="HTML",
+                            )
+                        except Exception:
+                            pass
+                        return
 
                 if promo_data:
                     use_promo_code(conn, promo_data["id"])
 
-                details = []
                 if is_unlimited:
                     for _ in range(qty):
                         create_order(conn, user_id, prod_id, unit_price,
@@ -1446,14 +1545,22 @@ async def _khqrpay_order_watcher(
                                      promo_code=promo_data["code"] if promo_data else None,
                                      original_amount=original_price)
                 else:
-                    for i in range(qty):
-                        item = stock_items[i]
+                    for item in claimed:
                         details.append(item["detail"])
-                        order_id = create_order(conn, user_id, prod_id, unit_price,
-                                                stock_id=item["id"],
-                                                promo_code=promo_data["code"] if promo_data else None,
-                                                original_amount=original_price)
-                        mark_stock_sold(conn, item["id"], order_id)
+                        order_id = create_order(
+                            conn, user_id, prod_id, unit_price,
+                            stock_id=item["id"],
+                            promo_code=promo_data["code"] if promo_data else None,
+                            original_amount=original_price,
+                        )
+                        link_stock_to_order(conn, item["id"], order_id)
+            except Exception:
+                if claimed:
+                    try:
+                        release_stock_items(conn, [c["id"] for c in claimed])
+                    except Exception:
+                        pass
+                raise
             finally:
                 conn.close()
 

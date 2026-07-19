@@ -92,10 +92,24 @@ def create_payment(conn, user_id, amount, qr_text='', qr_md5=''):
         raise
 
 def mark_payment_paid(conn, payment_id):
-    _get_supabase().table('payments').update({'status': 'paid', 'paid_at': 'now()'}).eq('id', payment_id).execute()
+    """
+    Mark payment as paid only if still pending.
+    Returns True if this call transitioned pending→paid (first claim wins).
+    Prevents double fulfillment when two pollers detect the same payment.
+    """
+    r = (
+        _get_supabase()
+        .table('payments')
+        .update({'status': 'paid', 'paid_at': 'now()'})
+        .eq('id', payment_id)
+        .eq('status', 'pending')
+        .select('id')
+        .execute()
+    )
+    return bool(r.data)
 
 def mark_payment_expired(conn, payment_id):
-    _get_supabase().table('payments').update({'status': 'expired'}).eq('id', payment_id).execute()
+    _get_supabase().table('payments').update({'status': 'expired'}).eq('id', payment_id).eq('status', 'pending').execute()
 
 # === CATEGORIES ===
 def add_category(conn, name, emoji='📂'):
@@ -162,7 +176,11 @@ def delete_product(conn, product_id):
 
 # === STOCK ===
 def add_stock_bulk(conn, product_id, details):
-    rows = [{'product_id': product_id, 'detail': d} for d in details]
+    """
+    Insert stock accounts. Each string in `details` is ONE account (1 line = 1 row).
+    Orders always bind to a specific stock row id so the buyer receives only that account.
+    """
+    rows = [{'product_id': product_id, 'detail': d, 'is_sold': 0} for d in details]
     _get_supabase().table('stock').insert(rows).execute()
     return len(rows)
 
@@ -173,7 +191,82 @@ def get_stock_for_product(conn, product_id, unsold_only=True):
     return _rows(q.order('id').execute().data)
 
 def mark_stock_sold(conn, stock_id, order_id=None):
-    _get_supabase().table('stock').update({'is_sold': 1, 'order_id': order_id}).eq('id', stock_id).execute()
+    """
+    Mark a single stock row sold only if still unsold.
+    Returns True if this call claimed the row (prevents double-sell).
+    """
+    payload = {'is_sold': 1}
+    if order_id is not None:
+        payload['order_id'] = order_id
+    r = (
+        _get_supabase()
+        .table('stock')
+        .update(payload)
+        .eq('id', stock_id)
+        .eq('is_sold', 0)
+        .select('id')
+        .execute()
+    )
+    return bool(r.data)
+
+def claim_stock_items(conn, product_id, qty):
+    """
+    Atomically reserve exactly `qty` unsold stock rows for a product.
+
+    Security model (1 line = 1 account):
+    - Each stock row is one account credential.
+    - Claim uses conditional update (is_sold must still be 0), so two concurrent
+      buyers cannot receive the same account.
+    - Returns the claimed rows (with their exact `detail`). Caller must create
+      orders linked to these row ids and deliver ONLY these details.
+
+    If fewer than `qty` can be claimed, already-claimed rows are released and
+    an empty list is returned (all-or-nothing for the requested quantity).
+    """
+    if qty <= 0:
+        return []
+
+    s = _get_supabase()
+    # Over-fetch candidates; concurrent buyers may snatch some before we claim.
+    candidates = get_stock_for_product(conn, product_id, unsold_only=True)
+    if len(candidates) < qty:
+        return []
+
+    claimed = []
+    for item in candidates:
+        if len(claimed) >= qty:
+            break
+        r = (
+            s.table('stock')
+            .update({'is_sold': 1})
+            .eq('id', item['id'])
+            .eq('is_sold', 0)
+            .eq('product_id', product_id)
+            .select('*')
+            .execute()
+        )
+        if r.data:
+            # Use server-returned row so detail is what was actually reserved
+            claimed.append(dict(r.data[0]))
+
+    if len(claimed) < qty:
+        # Partial claim under race: release everything so nothing is stuck sold
+        release_stock_items(conn, [c['id'] for c in claimed])
+        return []
+
+    return claimed[:qty]
+
+def release_stock_items(conn, stock_ids):
+    """Return previously claimed (but not yet ordered) stock back to inventory."""
+    if not stock_ids:
+        return
+    s = _get_supabase()
+    for sid in stock_ids:
+        s.table('stock').update({'is_sold': 0, 'order_id': None}).eq('id', sid).eq('is_sold', 1).execute()
+
+def link_stock_to_order(conn, stock_id, order_id):
+    """Bind a claimed stock row to its order (delivery always reads via stock_id)."""
+    _get_supabase().table('stock').update({'order_id': order_id, 'is_sold': 1}).eq('id', stock_id).execute()
 
 def get_stock_count(conn, product_id):
     r = _get_supabase().table('stock').select('*', count='exact').eq('product_id', product_id).eq('is_sold', 0).execute()
@@ -339,9 +432,10 @@ def update_stock_detail(conn, stock_id, detail):
     _get_supabase().table('stock').update({'detail': detail}).eq('id', stock_id).eq('is_sold', 0).execute()
 
 def replace_all_stock(conn, product_id, details):
+    """Replace unsold stock. Each entry in `details` is one exclusive account row."""
     s = _get_supabase()
     s.table('stock').delete().eq('product_id', product_id).eq('is_sold', 0).execute()
-    rows = [{'product_id': product_id, 'detail': d} for d in details]
+    rows = [{'product_id': product_id, 'detail': d, 'is_sold': 0} for d in details]
     s.table('stock').insert(rows).execute()
     return len(rows)
 

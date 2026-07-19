@@ -172,7 +172,9 @@ async def auto_check_payment(
         if result.get("paid"):
             conn = get_db()
             try:
-                mark_payment_paid(conn, payment_id)
+                # Only first pending→paid transition credits (no double deposit)
+                if not mark_payment_paid(conn, payment_id):
+                    return
                 new_balance = add_balance(conn, user_id, amount)
                 await context.bot.edit_message_caption(
                     chat_id=chat_id,
