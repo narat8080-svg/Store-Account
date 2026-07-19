@@ -1384,7 +1384,8 @@ async def buy_execute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
     else:
         # ── Limited product: send .txt file with accounts ──
-        file_content = "\n\n---\n\n".join(details)
+        # Number accounts 1. 2. 3. for this order (not stock add order / stock IDs)
+        file_content = _format_numbered_accounts(details)
         file_bytes = io.BytesIO(file_content.encode("utf-8"))
         file_bytes.name = f"{prod['name'].replace(' ','_')}_{qty}x.txt"
 
@@ -1396,7 +1397,7 @@ async def buy_execute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 f"{emoji_for_html(prod['emoji'])} <b>{prod['name']}</b> × {qty}\n"
                 f"{E('price_label')} Paid: <b>${total_price:.2f}</b>{promo_note}\n"
                 f"{E('balance_label')} Balance: <b>${new_balance:.2f}</b>\n\n"
-                f"<i>Your accounts are in the attached file. Thank you! {E('welcome')}</i>"
+                f"<i>Your accounts are numbered 1…{qty} in the file. Thank you! {E('welcome')}</i>"
             ),
             parse_mode="HTML",
         )
@@ -1694,7 +1695,8 @@ async def _khqrpay_order_watcher(
                     parse_mode="HTML",
                 )
             else:
-                file_content = "\n\n---\n\n".join(details)
+                # Number accounts 1. 2. 3. for this order (not stock add order / stock IDs)
+                file_content = _format_numbered_accounts(details)
                 file_bytes = io.BytesIO(file_content.encode("utf-8"))
                 file_bytes.name = f"{prod['name'].replace(' ','_')}_{qty}x.txt"
                 await context.bot.send_document(
@@ -1704,7 +1706,7 @@ async def _khqrpay_order_watcher(
                         f"{E('success')} <b>Purchase Successful!</b>\n\n"
                         f"{emoji_for_html(prod['emoji'])} <b>{prod['name']}</b> × {qty}\n"
                         f"{E('price_label')} Paid: <b>${amount:.2f}</b>\n\n"
-                        f"<i>Your accounts are in the attached file. {E('welcome')}</i>"
+                        f"<i>Your accounts are numbered 1…{qty} in the file. {E('welcome')}</i>"
                     ),
                     parse_mode="HTML",
                 )
@@ -1915,8 +1917,30 @@ async def _handle_custom_order(update: Update, context: ContextTypes.DEFAULT_TYP
     )
 
 
+def _format_numbered_accounts(details: list) -> str:
+    """
+    Number delivered accounts as 1. 2. 3. ... for this purchase/history.
+    Does NOT use stock row IDs or the order stock was added — only sequential
+    position of accounts the user received.
+    """
+    lines = []
+    n = 0
+    for d in details or []:
+        text = (str(d) if d is not None else "").strip()
+        if not text:
+            continue
+        n += 1
+        lines.append(f"{n}. {text}")
+    return "\n\n".join(lines) if lines else "No account data"
+
+
 async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show this user's purchase history only (never the product catalog)."""
+    """
+    My Orders: one button per product (not one per order row).
+
+    Re-ordering the same product updates that product's button and shows
+    history count as {N} (total accounts/orders for that product).
+    """
     query = update.callback_query
     await query.answer()
 
@@ -1924,16 +1948,17 @@ async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not user:
         return
 
+    from services.database import get_user_orders_grouped_by_product
+
     conn = get_db()
     try:
-        # Only real purchases for THIS telegram user
-        orders = get_user_orders(conn, user.id, limit=10)
+        groups = get_user_orders_grouped_by_product(conn, user.id, limit_products=30)
         db_user = get_or_create_user(conn, user.id, user.username, user.first_name)
         balance = float(db_user.get("balance", 0) or 0)
     finally:
         conn.close()
 
-    if not orders:
+    if not groups:
         await query.edit_message_text(
             f"{E('orders')} <b>My Orders</b>\n\n"
             f"No purchases yet.\n"
@@ -1949,32 +1974,42 @@ async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
         f"{E('orders')} <b>My Orders</b>\n"
         f"{E('balance_label')} Balance: <b>${balance:.2f}</b>\n\n"
-        f"<i>Tap an order to view details & get account file.</i>"
+        f"<i>One button per product. Number in {{N}} = order history count.\n"
+        f"Reorder the same product updates that button (no duplicate).</i>"
     )
 
     buttons = []
-    for o in orders:
-        # Extra safety: never list an order that is not this user's
-        try:
-            if int(o.get("user_id", -1)) != int(user.id):
-                continue
-        except (TypeError, ValueError):
-            continue
-
-        db_emoji = o.get("product_emoji", "📦")
-        name = o.get("product_name") or f"Product #{o.get('product_id', '?')}"
-        date = (o.get("created_at", "")[:10] or "?")
-        amount = float(o.get("amount") or 0)
+    for g in groups:
+        db_emoji = g.get("product_emoji", "📦")
+        name = g.get("product_name") or f"Product #{g.get('product_id', '?')}"
+        date = (g.get("last_created_at", "")[:10] or "?")
+        amount = float(g.get("last_amount") or 0)
+        count = int(g.get("order_count") or 0)
+        # {N} = how many accounts/orders for this product (history)
+        count_badge = f" {{{count}}}"
         pid = emoji_premium_id(db_emoji)
         icon_id = str(pid) if pid else None
         if pid:
-            btn_text = f"{name} — ${amount:.2f} | {date}"
+            btn_text = f"{name} — ${amount:.2f} | {date}{count_badge}"
         else:
-            btn_text = f"{emoji_for_button(db_emoji)} {name} — ${amount:.2f} | {date}"
-        buttons.append([_safe_button(btn_text, f"order_detail_{o['id']}", icon_id)])
+            btn_text = (
+                f"{emoji_for_button(db_emoji)} {name} — ${amount:.2f} | {date}{count_badge}"
+            )
+        # Cap Telegram button text (~64 chars is safe)
+        if len(btn_text) > 60:
+            short_name = (name[:18] + "…") if len(name) > 18 else name
+            if pid:
+                btn_text = f"{short_name} — ${amount:.2f} | {date}{count_badge}"
+            else:
+                btn_text = (
+                    f"{emoji_for_button(db_emoji)} {short_name} — "
+                    f"${amount:.2f} | {date}{count_badge}"
+                )
+        buttons.append([
+            _safe_button(btn_text, f"product_orders_{g['product_id']}", icon_id)
+        ])
 
     if not buttons:
-        # All rows filtered out → treat as empty
         await query.edit_message_text(
             f"{E('orders')} <b>My Orders</b>\n\nNo purchases yet.",
             parse_mode="HTML",
@@ -1993,7 +2028,13 @@ async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def order_detail(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show order details and send account file (only if this user owns the order)."""
+    """
+    Product order history for this user (all purchases of one product).
+
+    Accounts are listed 1. 2. 3. ... in receive order (oldest first),
+    not stock-row / add-stock order IDs.
+    Callback: product_orders_{product_id} (legacy order_detail_{id} still works).
+    """
     query = update.callback_query
     await query.answer()
 
@@ -2001,60 +2042,111 @@ async def order_detail(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not user:
         return
 
+    data = query.data or ""
+    product_id = None
+    legacy_order_id = None
     try:
-        order_id = int(query.data.replace("order_detail_", ""))
+        if data.startswith("product_orders_"):
+            product_id = int(data.replace("product_orders_", ""))
+        elif data.startswith("order_detail_"):
+            legacy_order_id = int(data.replace("order_detail_", ""))
+        else:
+            raise ValueError("bad callback")
     except (TypeError, ValueError):
         await query.edit_message_text("Order not found.", reply_markup=_back_button("menu_myorder"))
         return
 
     conn = get_db()
     try:
-        orders = get_user_orders(conn, user.id, limit=50)
-        order = next((o for o in orders if int(o.get("id", -1)) == order_id), None)
-        # Ownership already enforced in get_user_orders; re-check here
-        if order is not None:
-            try:
-                if int(order.get("user_id", -1)) != int(user.id):
-                    order = None
-            except (TypeError, ValueError):
-                order = None
+        if product_id is not None:
+            orders = get_user_orders(conn, user.id, limit=200, product_id=product_id)
+        else:
+            # Legacy single-order link → resolve product then load full history
+            all_orders = get_user_orders(conn, user.id, limit=100)
+            one = next(
+                (o for o in all_orders if int(o.get("id", -1)) == legacy_order_id),
+                None,
+            )
+            if one is None:
+                orders = []
+            else:
+                product_id = int(one["product_id"])
+                orders = get_user_orders(conn, user.id, limit=200, product_id=product_id)
     finally:
         conn.close()
 
-    if not order:
+    # Ownership filter
+    safe = []
+    for o in orders:
+        try:
+            if int(o.get("user_id", -1)) == int(user.id):
+                safe.append(o)
+        except (TypeError, ValueError):
+            continue
+    orders = safe
+
+    if not orders:
         await query.edit_message_text("Order not found.", reply_markup=_back_button("menu_myorder"))
         return
 
-    detail = order.get("stock_detail", "No data")
-    name = order.get("product_name") or f"Product #{order.get('product_id', '?')}"
-    emoji = emoji_for_html(order.get("product_emoji", "📦"))
-    # Full datetime: 2026-07-13 15:56
-    date_full = (order.get("created_at", "")[:16] or "?").replace("T", " ")
-    date_short = (order.get("created_at", "")[:10] or "?")
+    # Newest first from DB — reverse for history numbering 1 = first purchase
+    chronological = list(reversed(orders))
+    name = chronological[0].get("product_name") or f"Product #{product_id}"
+    emoji = emoji_for_html(chronological[0].get("product_emoji", "📦"))
+    total_amount = sum(float(o.get("amount") or 0) for o in chronological)
+    last = orders[0]  # newest
+    last_date = (last.get("created_at", "")[:16] or "?").replace("T", " ")
+    count = len(chronological)
 
-    # Build file content with date/time header
+    # Collect account lines — sequential 1. 2. 3. for what user received
+    details = []
+    for o in chronological:
+        d = (o.get("stock_detail") or "").strip()
+        if d:
+            details.append(d)
+        else:
+            # Unlimited / no stock row still counts as a purchase slot
+            details.append(f"(Order #{o.get('id')} — no account file)")
+
+    numbered = _format_numbered_accounts(details)
+
     file_content = (
-        f"🛒 Order #{order_id}\n"
         f"📦 Product: {name}\n"
-        f"💰 Amount: ${order['amount']:.2f}\n"
-        f"📅 Date: {date_full}\n"
+        f"🛒 History count: {count}\n"
+        f"💰 Total spent: ${total_amount:.2f}\n"
+        f"📅 Last order: {last_date}\n"
         f"{'─' * 30}\n\n"
-        f"{detail}"
+        f"{numbered}\n"
     )
     file_bytes = io.BytesIO(file_content.encode("utf-8"))
-    file_bytes.name = f"order_{order_id}_{name.replace(' ','_')[:20]}.txt"
+    safe_name = name.replace(" ", "_")[:20]
+    file_bytes.name = f"{safe_name}_accounts_{count}x.txt"
     await context.bot.send_document(
         chat_id=query.message.chat_id,
         document=file_bytes,
-        caption=f"📄 {emoji} <b>{name}</b> — ${order['amount']:.2f}\n📅 {date_full}",
+        caption=(
+            f"📄 {emoji} <b>{name}</b>\n"
+            f"History: <b>{{{count}}}</b> · Total: <b>${total_amount:.2f}</b>\n"
+            f"📅 Last: {last_date}"
+        ),
         parse_mode="HTML",
     )
 
+    # Preview first few numbered lines in chat (cap length; escape for HTML)
+    from html import escape as html_escape
+    preview = numbered
+    if len(preview) > 800:
+        preview = preview[:800] + "\n…"
+    preview_html = html_escape(preview, quote=False)
+
     await query.edit_message_text(
         f"{emoji} <b>{name}</b>\n\n"
-        f"💰 Amount: <b>${order['amount']:.2f}</b>\n"
-        f"📅 Date: {date_full}\n\n"
-        f"<i>Account details in the file above.</i>",
+        f"📋 History: <b>{{{count}}}</b>\n"
+        f"💰 Total spent: <b>${total_amount:.2f}</b>\n"
+        f"📅 Last order: {last_date}\n\n"
+        f"<b>Accounts</b> (numbered 1, 2, 3…):\n"
+        f"<code>{preview_html}</code>\n\n"
+        f"<i>Full list is in the file above.</i>",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([
             [_make_smart_button("Back to Orders", "menu_myorder", "back")],
@@ -2166,7 +2258,7 @@ async def _route_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, da
     # --- My Order ---
     elif data == "menu_myorder":
         await my_orders(update, context)
-    elif data.startswith("order_detail_"):
+    elif data.startswith("product_orders_") or data.startswith("order_detail_"):
         await order_detail(update, context)
     elif data == "custom_order":
         await custom_order_start(update, context)

@@ -284,11 +284,12 @@ def create_order(conn, user_id, product_id, amount, stock_id=None, promo_code=No
     }).execute()
     return r.data[0]['id'] if r.data else 0
 
-def get_user_orders(conn, user_id, limit=20):
+def get_user_orders(conn, user_id, limit=20, product_id=None):
     """
     Return purchases for this Telegram user only.
     - Filters by user_id (int) so catalog products never appear as orders
     - Excludes refunded orders
+    - Optional product_id filter
     - Client-side re-check of user_id as a safety net
     """
     s = _get_supabase()
@@ -298,14 +299,16 @@ def get_user_orders(conn, user_id, limit=20):
         return []
 
     # Fetch a bit extra so post-filters (status / ownership) still fill the page
-    r = (
+    q = (
         s.table('orders')
         .select('*')
         .eq('user_id', uid)
         .order('created_at', desc=True)
         .limit(max(limit * 3, limit))
-        .execute()
     )
+    if product_id is not None:
+        q = q.eq('product_id', int(product_id))
+    r = q.execute()
     orders = _rows(r.data)
 
     result = []
@@ -337,12 +340,57 @@ def get_user_orders(conn, user_id, limit=20):
             sr = s.table('stock').select('detail').eq('id', o['stock_id']).execute()
             if sr.data:
                 o['stock_detail'] = sr.data[0].get('detail', '')
+        else:
+            o.setdefault('stock_detail', '')
 
         result.append(o)
         if len(result) >= limit:
             break
 
     return result
+
+
+def get_user_orders_grouped_by_product(conn, user_id, limit_products=30):
+    """
+    One row per product for My Orders.
+
+    Returns list of dicts (newest product activity first):
+      product_id, product_name, product_emoji, order_count,
+      total_amount, last_amount, last_created_at, last_order_id,
+      orders (list of order dicts, newest first)
+    Re-ordering the same product updates the same group (no extra button).
+    """
+    orders = get_user_orders(conn, user_id, limit=300)
+    groups = {}  # product_id -> group dict
+    order_keys = []  # preserve first-seen (= most recent activity) order
+
+    for o in orders:
+        try:
+            pid = int(o['product_id'])
+        except (TypeError, ValueError, KeyError):
+            continue
+        if pid not in groups:
+            order_keys.append(pid)
+            groups[pid] = {
+                'product_id': pid,
+                'product_name': o.get('product_name') or f"Product #{pid}",
+                'product_emoji': o.get('product_emoji') or '📦',
+                'order_count': 0,
+                'total_amount': 0.0,
+                'last_amount': float(o.get('amount') or 0),
+                'last_created_at': o.get('created_at') or '',
+                'last_order_id': o.get('id'),
+                'orders': [],
+            }
+        g = groups[pid]
+        g['order_count'] += 1
+        g['total_amount'] += float(o.get('amount') or 0)
+        g['orders'].append(o)
+        # first seen is newest (orders are desc by created_at)
+        # keep last_* from first insert
+
+    result = [groups[k] for k in order_keys]
+    return result[:limit_products]
 
 def get_orders_today(conn):
     from datetime import datetime
