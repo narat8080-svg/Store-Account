@@ -80,3 +80,12 @@ WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "/webhook")
 # ---------------------------------------------------------------------------
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
+
+# ---------------------------------------------------------------------------
+# ProdSeller supplier API
+# Customers pay from the bot wallet; ProdSeller supplies and delivers keys.
+# ---------------------------------------------------------------------------
+PRODSELLER_API_BASE_URL = os.getenv(
+    "PRODSELLER_API_BASE_URL", "http://51.77.244.194/v1"
+).rstrip("/")
+PRODSELLER_API_KEY = os.getenv("PRODSELLER_API_KEY", "").strip()

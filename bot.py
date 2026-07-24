@@ -2,6 +2,7 @@ import asyncio
 import io
 import logging
 import uuid
+from html import escape
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import Conflict, NetworkError, TimedOut, TelegramError
@@ -46,6 +47,13 @@ from services.database import (
     add_balance,  # used for negative balance (deduct)
 )
 from services.khqrpay import create_aba_qr, verify_aba_payment, get_khqrpay_config
+from services.prodseller import (
+    ProdSellerError,
+    create_order as create_prodseller_order,
+    get_product as get_prodseller_product,
+    is_configured as prodseller_configured,
+    list_products as list_prodseller_products,
+)
 
 # Admin imports
 from admin import (
@@ -173,6 +181,7 @@ logger = logging.getLogger(__name__)
 # ===========================================================================
 _user_cache: dict[int, dict] = {}  # user_id → user dict
 _cache_hits = 0
+_prodseller_locks: dict[int, asyncio.Lock] = {}
 
 
 def _cached_get_user(conn, user_id: int, username=None, first_name=None) -> dict:
@@ -990,28 +999,75 @@ async def _khqrpay_watcher(
 # ===========================================================================
 async def product_categories(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Flat product list — Shop Now goes straight to products (no category step).
-    Categories still exist in the DB (products remain linked) but are hidden from users.
+    Show the local catalog and, when configured, the live ProdSeller catalog.
+    ProdSeller products use a separate callback prefix and purchase flow because
+    their stock and order IDs come from the supplier API.
     """
     query = update.callback_query
     await query.answer()
+    # Leaving a quantity screen must not make later free-form messages look
+    # like a new checkout attempt.
+    context.user_data.pop("buy_state", None)
+    context.user_data.pop("buy_data", None)
+    context.user_data.pop("prodseller_idempotency_key", None)
 
     from services.database import get_all_products
+
+    supplier_products = []
+    supplier_error = None
+    if prodseller_configured():
+        try:
+            supplier_products = await list_prodseller_products()
+        except ProdSellerError as exc:
+            supplier_error = exc.message
+            logger.warning("ProdSeller product list failed: %s", exc)
+
     conn = get_db()
     try:
         products = get_all_products(conn)
     finally:
         conn.close()
 
-    if not products:
+    if not supplier_products and not products:
+        error_note = f"\n\n<i>Supplier unavailable: {escape(supplier_error)}</i>" if supplier_error else ""
         await query.edit_message_text(
-            f"{E('product')} <b>Products</b>\n\nNo products available yet.\nPlease check back later!",
+            f"{E('product')} <b>Products</b>\n\nNo products available yet.\nPlease check back later!{error_note}",
             parse_mode="HTML",
             reply_markup=_back_button(),
         )
         return
 
     buttons = []
+    text_sections = [f"{E('product')} <b>Products</b>"]
+
+    if supplier_products:
+        text_sections.append("\n<b>ProdSeller Products</b>")
+        for p in supplier_products:
+            product_id = str(p.get("id") or "").strip()
+            if not product_id:
+                continue
+            stock = p.get("stock")
+            in_stock = bool(p.get("inStock"))
+            if not in_stock:
+                stock_label = " | Out of Stock"
+                stock_count = 0
+            elif isinstance(stock, int):
+                stock_label = f" | Stock: {stock}"
+                stock_count = stock
+            else:
+                stock_label = " | In Stock"
+                stock_count = 999
+            name = escape(str(p.get("name") or "Product"))
+            try:
+                price = float(p.get("price", 0))
+            except (TypeError, ValueError):
+                price = 0.0
+            label = f"{name} — ${price:.2f}{stock_label}"
+            style = _get_button_style("buy", stock_count)
+            buttons.append([_safe_button(label, f"ps_product_{product_id}", None, style)])
+
+    if products:
+        text_sections.append("\n<b>Local Products</b>")
     for p in products:
         stock = p.get("stock_count", 0)
         is_unlimited = p.get("is_unlimited", 0)
@@ -1035,15 +1091,348 @@ async def product_categories(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     buttons.append([_make_smart_button("Back", "menu_start", "back")])
 
+    if supplier_error:
+        text_sections.append(f"\n<i>ProdSeller is temporarily unavailable: {escape(supplier_error)}</i>")
+
     await query.edit_message_text(
-        f"{E('product')} <b>Products</b>\n\n"
-        f"Tap a product to buy:\n"
-        f"<i>Stock is shown next to each product.</i>",
+        "\n".join(text_sections) + "\n\nTap a product to buy:\n<i>Stock is shown next to each product.</i>",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(buttons),
     )
 
 
+
+
+# ===========================================================================
+# PRODSELLER BUY FLOW (supplier catalog + local wallet payment)
+# ===========================================================================
+def _prodseller_stock_label(product: dict) -> tuple[str, int | None]:
+    """Return a user-facing stock label and numeric stock limit, if known."""
+    stock = product.get("stock")
+    if product.get("inStock") is False or stock == 0:
+        return "Out of Stock", 0
+    if isinstance(stock, int):
+        return str(stock), stock
+    return "Available", None
+
+
+def _prodseller_error_text(exc: ProdSellerError) -> str:
+    if exc.status == 402:
+        return "The supplier balance is insufficient. Please contact the administrator."
+    if exc.status == 409:
+        return "This product went out of stock. Please refresh the shop and try again."
+    if exc.status == 401:
+        return "The supplier API key is invalid or disabled. Please contact the administrator."
+    return exc.message
+
+
+async def prodseller_buy_detail(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show a live ProdSeller product and ask for quantity."""
+    query = update.callback_query
+    await query.answer()
+    product_id = (query.data or "")[len("ps_product_"):].strip()
+    if not product_id:
+        await query.edit_message_text("❌ Invalid supplier product.", reply_markup=_back_button("menu_product"))
+        return
+
+    try:
+        product = await get_prodseller_product(product_id)
+    except ProdSellerError as exc:
+        await query.edit_message_text(
+            f"❌ {escape(_prodseller_error_text(exc))}",
+            parse_mode="HTML",
+            reply_markup=_back_button("menu_product"),
+        )
+        return
+
+    stock_label, stock_limit = _prodseller_stock_label(product)
+    if stock_limit == 0:
+        await query.edit_message_text(
+            f"❌ <b>Out of Stock</b>\n\n{escape(str(product.get('name') or 'Product'))}",
+            parse_mode="HTML",
+            reply_markup=_back_button("menu_product"),
+        )
+        return
+
+    try:
+        price = float(product.get("price", 0))
+    except (TypeError, ValueError):
+        price = 0.0
+    name = escape(str(product.get("name") or "Product"))
+    description = escape(str(product.get("description") or ""))
+    description_line = f"\n📝 {description}" if description else ""
+    context.user_data["buy_state"] = "prodseller_qty"
+    context.user_data["buy_data"] = {"product_id": product_id}
+
+    await query.edit_message_text(
+        f"🛒 <b>{name}</b>{description_line}\n"
+        f"💵 Price: <b>${price:.2f}</b> each\n"
+        f"📦 Stock: <b>{stock_label}</b>\n\n"
+        "🔢 <b>Enter quantity</b>\n"
+        "<i>Your bot Wallet will be charged. The key will be delivered after the supplier order succeeds.</i>",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([[
+            _make_smart_button("Cancel", "menu_product", "cancel")
+        ]]),
+    )
+
+
+async def _handle_prodseller_qty(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Validate quantity and show a wallet confirmation screen."""
+    if not update.message:
+        return
+    try:
+        quantity = int((update.message.text or "").strip())
+        if quantity < 1:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_html("❌ Enter a valid quantity (1 or more).")
+        return
+
+    product_id = (context.user_data.get("buy_data") or {}).get("product_id")
+    if not product_id:
+        context.user_data.pop("buy_state", None)
+        await update.message.reply_html("❌ The supplier checkout expired. Please open the shop again.")
+        return
+
+    try:
+        product = await get_prodseller_product(str(product_id))
+    except ProdSellerError as exc:
+        await update.message.reply_html(f"❌ {escape(_prodseller_error_text(exc))}")
+        return
+
+    stock_label, stock_limit = _prodseller_stock_label(product)
+    if stock_limit == 0 or (stock_limit is not None and quantity > stock_limit):
+        await update.message.reply_html(
+            f"❌ Only <b>{stock_label}</b> available. Enter a smaller quantity:"
+        )
+        return
+
+    try:
+        unit_price = float(product.get("price", 0))
+    except (TypeError, ValueError):
+        await update.message.reply_html("❌ Supplier returned an invalid product price.")
+        return
+    total = unit_price * quantity
+    context.user_data["buy_state"] = "prodseller_confirm"
+    context.user_data["buy_data"] = {
+        "product_id": str(product_id),
+        "quantity": quantity,
+        "unit_price": unit_price,
+        "name": str(product.get("name") or "Product"),
+    }
+    context.user_data["prodseller_idempotency_key"] = f"tg_{update.effective_user.id}_{uuid.uuid4().hex}"
+
+    await update.message.reply_html(
+        f"🛒 <b>Confirm ProdSeller Order</b>\n\n"
+        f"Product: <b>{escape(str(product.get('name') or 'Product'))}</b>\n"
+        f"Quantity: <b>{quantity}</b>\n"
+        f"Unit price: <b>${unit_price:.2f}</b>\n"
+        f"Total: <b>${total:.2f}</b>\n\n"
+        "Your existing bot Wallet will be charged.",
+        reply_markup=InlineKeyboardMarkup([
+            [_make_smart_button(f"Confirm Order — ${total:.2f}", f"ps_confirm_{product_id}_{quantity}", "confirm")],
+            [_make_smart_button("Cancel", "menu_product", "cancel")],
+        ]),
+    )
+
+
+async def prodseller_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Charge the customer's bot wallet and create the supplier order."""
+    query = update.callback_query
+    await query.answer()
+    raw = (query.data or "")[len("ps_confirm_"):]
+    try:
+        product_id, quantity_text = raw.rsplit("_", 1)
+        quantity = int(quantity_text)
+        if not product_id or quantity < 1:
+            raise ValueError
+    except ValueError:
+        await query.edit_message_text("❌ Invalid supplier order.", reply_markup=_back_button("menu_product"))
+        return
+
+    checkout = context.user_data.get("buy_data") or {}
+    if (
+        context.user_data.get("buy_state") != "prodseller_confirm"
+        or str(checkout.get("product_id")) != product_id
+        or int(checkout.get("quantity", 0)) != quantity
+    ):
+        await query.edit_message_text(
+            "❌ This checkout expired. Please open the shop again.",
+            reply_markup=_back_button("menu_product"),
+        )
+        return
+
+    user_id = update.effective_user.id
+    lock = _prodseller_locks.setdefault(user_id, asyncio.Lock())
+    async with lock:
+        # A second Telegram callback can arrive while the first one is
+        # waiting on the supplier. Re-check state after acquiring the lock so
+        # the same wallet checkout cannot be charged twice.
+        current_checkout = context.user_data.get("buy_data") or {}
+        if (
+            context.user_data.get("buy_state") != "prodseller_confirm"
+            or str(current_checkout.get("product_id")) != product_id
+            or int(current_checkout.get("quantity", 0)) != quantity
+        ):
+            await query.edit_message_text(
+                "❌ This checkout has already been processed.",
+                reply_markup=_back_button("menu_product"),
+            )
+            return
+
+        try:
+            product = await get_prodseller_product(product_id)
+        except ProdSellerError as exc:
+            await query.edit_message_text(
+                f"❌ {escape(_prodseller_error_text(exc))}",
+                parse_mode="HTML",
+                reply_markup=_back_button("menu_product"),
+            )
+            return
+
+        stock_label, stock_limit = _prodseller_stock_label(product)
+        if stock_limit == 0 or (stock_limit is not None and quantity > stock_limit):
+            await query.edit_message_text(
+                f"❌ Only <b>{stock_label}</b> available. Please try again.",
+                parse_mode="HTML",
+                reply_markup=_back_button("menu_product"),
+            )
+            return
+
+        try:
+            unit_price = float(product.get("price", 0))
+        except (TypeError, ValueError):
+            await query.edit_message_text("❌ Supplier returned an invalid product price.", reply_markup=_back_button("menu_product"))
+            return
+        total = round(unit_price * quantity, 2)
+
+        conn = get_db()
+        charged = False
+        new_balance = 0.0
+        try:
+            db_user = get_or_create_user(conn, user_id, query.from_user.username, query.from_user.first_name)
+            balance = float(db_user.get("balance", 0))
+            if balance < total:
+                shortfall = total - balance
+                await query.edit_message_text(
+                    f"❌ <b>Insufficient Wallet Balance</b>\n\n"
+                    f"Total: <b>${total:.2f}</b>\n"
+                    f"Balance: <b>${balance:.2f}</b>\n"
+                    f"Need: <b>${shortfall:.2f}</b> more.",
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup([
+                        [_make_smart_button("Deposit", "wallet_deposit", "deposit")],
+                        [_make_smart_button("Back", "menu_product", "back")],
+                    ]),
+                )
+                return
+
+            new_balance = add_balance(conn, user_id, -total)
+            charged = True
+        finally:
+            conn.close()
+
+        idempotency_key = context.user_data.get("prodseller_idempotency_key") or (
+            f"tg_{user_id}_{uuid.uuid4().hex}"
+        )
+        try:
+            order = await create_prodseller_order(product_id, quantity, idempotency_key)
+        except ProdSellerError as exc:
+            # Supplier failure means the customer's wallet must be restored.
+            refund_ok = True
+            if charged:
+                try:
+                    refund_conn = get_db()
+                    try:
+                        add_balance(refund_conn, user_id, total)
+                    finally:
+                        refund_conn.close()
+                except Exception:
+                    refund_ok = False
+                    logger.exception("ProdSeller order failed and automatic wallet refund failed for user %s", user_id)
+            context.user_data.pop("buy_state", None)
+            context.user_data.pop("buy_data", None)
+            context.user_data.pop("prodseller_idempotency_key", None)
+            refund_note = (
+                "Your Wallet charge was refunded."
+                if refund_ok
+                else "Automatic refund failed; please contact the administrator immediately."
+            )
+            await query.edit_message_text(
+                f"❌ <b>Supplier Order Failed</b>\n\n{escape(_prodseller_error_text(exc))}\n"
+                f"{refund_note}",
+                parse_mode="HTML",
+                reply_markup=_back_button("menu_product"),
+            )
+            return
+
+        # ProdSeller may apply a bulk discount after the product lookup.
+        try:
+            actual_amount = float(order.get("amount", total))
+        except (TypeError, ValueError):
+            actual_amount = total
+        if actual_amount < total:
+            refund_conn = get_db()
+            try:
+                new_balance = add_balance(refund_conn, user_id, round(total - actual_amount, 2))
+            finally:
+                refund_conn.close()
+        else:
+            new_balance = float(new_balance)
+
+        context.user_data.pop("buy_state", None)
+        context.user_data.pop("buy_data", None)
+        context.user_data.pop("prodseller_idempotency_key", None)
+
+        delivered_keys = order.get("deliveredKeys") or []
+        if not delivered_keys and order.get("deliveredKey"):
+            delivered_keys = [order["deliveredKey"]]
+        order_id = escape(str(order.get("orderId") or "unknown"))
+        product_name = str(product.get("name") or "Product")
+        if delivered_keys:
+            file_content = _format_numbered_accounts([str(k) for k in delivered_keys])
+            file_bytes = io.BytesIO(file_content.encode("utf-8"))
+            file_bytes.name = f"{product_name.replace(' ', '_')}_{quantity}x.txt"
+            await context.bot.send_document(
+                chat_id=query.message.chat_id,
+                document=file_bytes,
+                caption=(
+                    f"✅ <b>Purchase Successful!</b>\n\n"
+                    f"{escape(product_name)} × {quantity}\n"
+                    f"Paid: <b>${actual_amount:.2f}</b>\n"
+                    f"Wallet balance: <b>${new_balance:.2f}</b>\n"
+                    f"Supplier order: <code>{order_id}</code>"
+                ),
+                parse_mode="HTML",
+            )
+            delivery_note = f"📄 {len(delivered_keys)} key(s) sent as a file above."
+        else:
+            delivery_note = (
+                f"Supplier status: <b>{escape(str(order.get('status') or 'pending'))}</b>. "
+                "Delivery is still being processed."
+            )
+
+        await query.edit_message_text(
+            f"✅ <b>Purchase Complete!</b>\n\n"
+            f"{delivery_note}\n"
+            f"Wallet balance: <b>${new_balance:.2f}</b>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [_make_smart_button("Browse More", "menu_product", "menu_product")],
+                [_make_smart_button("Back to Menu", "menu_start", "back")],
+            ]),
+        )
+
+        await _notify_order_group(
+            context,
+            query.from_user,
+            {"name": product_name, "price": actual_amount},
+            quantity,
+            actual_amount,
+            new_balance,
+            pay_method="ProdSeller + Wallet",
+        )
 
 
 # ===========================================================================
@@ -2244,6 +2633,10 @@ async def _route_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, da
         await product_categories(update, context)
 
     # --- Buy Flow ---
+    elif data.startswith("ps_product_"):
+        await prodseller_buy_detail(update, context)
+    elif data.startswith("ps_confirm_"):
+        await prodseller_order(update, context)
     elif data.startswith("buy_detail_"):
         await buy_detail(update, context)
     elif data.startswith("pay_wallet_") or data.startswith("pay_khqr_"):
@@ -2522,6 +2915,8 @@ async def unified_text_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await handle_admin_text(update, context)
     elif context.user_data.get("buy_state") == "buy_promo":
         await handle_buy_promo(update, context)
+    elif context.user_data.get("buy_state") == "prodseller_qty":
+        await _handle_prodseller_qty(update, context)
     elif context.user_data.get("buy_state") == "buy_custom_qty":
         await _handle_custom_qty(update, context)
     elif context.user_data.get("buy_state") == "custom_deposit":
