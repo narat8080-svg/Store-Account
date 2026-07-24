@@ -51,7 +51,9 @@ from services.database import (
 from services.khqrpay import create_aba_qr, verify_aba_payment, get_khqrpay_config
 from services.prodseller import (
     ProdSellerError,
+    apply_product_override,
     create_order as create_prodseller_order,
+    get_product_overrides,
     get_product as get_prodseller_product,
     is_configured as prodseller_configured,
     list_products as list_prodseller_products,
@@ -74,6 +76,11 @@ from admin import (
     admin_editcat_name,
     admin_editcat_emoji,
     admin_products,
+    admin_prodseller_products,
+    admin_prodseller_edit,
+    admin_prodseller_set_price,
+    admin_prodseller_set_emoji,
+    admin_prodseller_reset,
     admin_add_product_start,
     admin_prod_cat_selected,
     admin_del_product_start,
@@ -1098,10 +1105,16 @@ async def product_categories(update: Update, context: ContextTypes.DEFAULT_TYPE)
     from services.database import get_all_products
 
     supplier_products = []
+    supplier_overrides = {}
     supplier_error = None
     if prodseller_configured():
         try:
             supplier_products = await list_prodseller_products()
+            conn = get_db()
+            try:
+                supplier_overrides = get_product_overrides(conn)
+            finally:
+                conn.close()
         except ProdSellerError as exc:
             supplier_error = exc.message
             logger.warning("ProdSeller product list failed: %s", exc)
@@ -1130,6 +1143,7 @@ async def product_categories(update: Update, context: ContextTypes.DEFAULT_TYPE)
             product_id = str(p.get("id") or "").strip()
             if not product_id:
                 continue
+            p = apply_product_override(p, supplier_overrides)
             stock = p.get("stock")
             in_stock = bool(p.get("inStock"))
             if not in_stock:
@@ -1146,9 +1160,13 @@ async def product_categories(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 price = float(p.get("price", 0))
             except (TypeError, ValueError):
                 price = 0.0
+            product_emoji = p.get("emoji", "📦")
+            premium_id = emoji_premium_id(product_emoji)
             label = f"{name} — ${price:.2f}{stock_label}"
+            if not premium_id:
+                label = f"{emoji_for_button(product_emoji)} {label}"
             style = _get_button_style("buy", stock_count)
-            buttons.append([_safe_button(label, f"ps_product_{product_id}", None, style)])
+            buttons.append([_safe_button(label, f"ps_product_{product_id}", str(premium_id) if premium_id else None, style)])
 
     if products:
         text_sections.append("\n<b>Local Products</b>")
@@ -1200,6 +1218,23 @@ def _prodseller_stock_label(product: dict) -> tuple[str, int | None]:
     return "Available", None
 
 
+def _prodseller_sale_product(product: dict) -> dict:
+    """Apply the admin's persisted selling price and emoji override."""
+    conn = get_db()
+    try:
+        overrides = get_product_overrides(conn)
+    finally:
+        conn.close()
+    return apply_product_override(product, overrides)
+
+
+def _prodseller_price_guard(product: dict) -> tuple[float, float, bool]:
+    """Return (selling price, current supplier cost, safe-to-sell)."""
+    selling_price = float(product.get("price", 0))
+    supplier_price = float(product.get("supplier_price", selling_price))
+    return selling_price, supplier_price, selling_price >= supplier_price
+
+
 def _prodseller_error_text(exc: ProdSellerError) -> str:
     if exc.status == 402:
         return "The supplier balance is insufficient. Please contact the administrator."
@@ -1221,6 +1256,7 @@ async def prodseller_buy_detail(update: Update, context: ContextTypes.DEFAULT_TY
 
     try:
         product = await get_prodseller_product(product_id)
+        product = _prodseller_sale_product(product)
     except ProdSellerError as exc:
         await query.edit_message_text(
             f"❌ {escape(_prodseller_error_text(exc))}",
@@ -1242,6 +1278,13 @@ async def prodseller_buy_detail(update: Update, context: ContextTypes.DEFAULT_TY
         price = float(product.get("price", 0))
     except (TypeError, ValueError):
         price = 0.0
+    _, supplier_price, price_safe = _prodseller_price_guard(product)
+    if not price_safe:
+        await query.edit_message_text(
+            f"❌ This product's selling price is below the current supplier cost (${supplier_price:.2f}). Please contact the administrator.",
+            reply_markup=_back_button("menu_product"),
+        )
+        return
     name = escape(str(product.get("name") or "Product"))
     description = escape(str(product.get("description") or ""))
     description_line = f"\n📝 {description}" if description else ""
@@ -1281,6 +1324,7 @@ async def _handle_prodseller_qty(update: Update, context: ContextTypes.DEFAULT_T
 
     try:
         product = await get_prodseller_product(str(product_id))
+        product = _prodseller_sale_product(product)
     except ProdSellerError as exc:
         await update.message.reply_html(f"❌ {escape(_prodseller_error_text(exc))}")
         return
@@ -1296,6 +1340,12 @@ async def _handle_prodseller_qty(update: Update, context: ContextTypes.DEFAULT_T
         unit_price = float(product.get("price", 0))
     except (TypeError, ValueError):
         await update.message.reply_html("❌ Supplier returned an invalid product price.")
+        return
+    _, supplier_price, price_safe = _prodseller_price_guard(product)
+    if not price_safe:
+        await update.message.reply_html(
+            f"❌ Selling price is below the supplier cost (${supplier_price:.2f}). Please contact the administrator."
+        )
         return
     total = unit_price * quantity
     context.user_data["buy_state"] = "prodseller_confirm"
@@ -1370,6 +1420,7 @@ async def prodseller_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
         try:
             product = await get_prodseller_product(product_id)
+            product = _prodseller_sale_product(product)
         except ProdSellerError as exc:
             await query.edit_message_text(
                 f"❌ {escape(_prodseller_error_text(exc))}",
@@ -1391,6 +1442,13 @@ async def prodseller_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             unit_price = float(product.get("price", 0))
         except (TypeError, ValueError):
             await query.edit_message_text("❌ Supplier returned an invalid product price.", reply_markup=_back_button("menu_product"))
+            return
+        _, supplier_price, price_safe = _prodseller_price_guard(product)
+        if not price_safe:
+            await query.edit_message_text(
+                f"❌ Selling price is below the supplier cost (${supplier_price:.2f}). Please contact the administrator.",
+                reply_markup=_back_button("menu_product"),
+            )
             return
         total = round(unit_price * quantity, 2)
 
@@ -1559,12 +1617,19 @@ async def prodseller_khqr_start(update: Update, context: ContextTypes.DEFAULT_TY
 
     try:
         product = await get_prodseller_product(product_id)
+        product = _prodseller_sale_product(product)
         stock_label, stock_limit = _prodseller_stock_label(product)
         if stock_limit == 0 or (stock_limit is not None and quantity > stock_limit):
             raise ProdSellerError(f"Only {stock_label} available.", status=409)
         unit_price = float(product.get("price", 0))
         if unit_price <= 0:
             raise ProdSellerError("Supplier returned an invalid product price.", status=502)
+        _, supplier_price, price_safe = _prodseller_price_guard(product)
+        if not price_safe:
+            raise ProdSellerError(
+                f"Selling price is below the supplier cost (${supplier_price:.2f}). Please contact the administrator.",
+                status=409,
+            )
     except (ProdSellerError, ValueError, TypeError) as exc:
         context.user_data["buy_state"] = "prodseller_confirm"
         message = _prodseller_error_text(exc) if isinstance(exc, ProdSellerError) else "Invalid supplier price."
@@ -3210,6 +3275,16 @@ async def _route_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, da
     # --- Admin Products ---
     elif data == "admin_products":
         await admin_products(update, context)
+    elif data == "admin_prodseller_products":
+        await admin_prodseller_products(update, context)
+    elif data.startswith("admin_ps_edit_"):
+        await admin_prodseller_edit(update, context)
+    elif data.startswith("admin_ps_price_"):
+        await admin_prodseller_set_price(update, context)
+    elif data.startswith("admin_ps_emoji_"):
+        await admin_prodseller_set_emoji(update, context)
+    elif data.startswith("admin_ps_reset_price_") or data.startswith("admin_ps_reset_emoji_"):
+        await admin_prodseller_reset(update, context)
     elif data == "admin_add_product":
         await admin_add_product_start(update, context)
     elif data.startswith("admin_prod_cat_"):

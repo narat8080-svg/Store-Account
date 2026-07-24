@@ -22,6 +22,7 @@ State machine via context.user_data["admin_state"]:
 import asyncio
 import json
 import logging
+from html import escape
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
@@ -76,6 +77,15 @@ from services.database import (
     set_bot_setting,
     export_orders_csv,
     export_users_csv,
+)
+from services.prodseller import (
+    ProdSellerError,
+    apply_product_override,
+    get_product_overrides,
+    get_product as get_prodseller_product,
+    is_configured as prodseller_configured,
+    list_products as list_prodseller_products,
+    save_product_override,
 )
 
 logger = logging.getLogger(__name__)
@@ -424,6 +434,7 @@ async def admin_products(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     keyboard = [
         [_styled_btn("➕ Add Product", "admin_add_product", "admin_dashboard")],
         [_styled_btn("✏️ Edit Product", "admin_edit_product", "admin_products")],
+        [_styled_btn("🔌 ProdSeller Products", "admin_prodseller_products", "admin_products")],
         [_styled_btn("🗑 Delete Product", "admin_del_product", "admin_close")],
         [_styled_btn("🔙 Back", "admin_panel", "admin_close")],
     ]
@@ -431,6 +442,163 @@ async def admin_products(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await query.edit_message_text(
         text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard)
     )
+
+
+async def admin_prodseller_products(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """List live ProdSeller products with local selling-price/emoji overrides."""
+    query = update.callback_query
+    await query.answer()
+    if not prodseller_configured():
+        await query.edit_message_text(
+            "🔌 <b>ProdSeller</b>\n\nAPI is not configured.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="admin_products")]]),
+        )
+        return
+
+    try:
+        products = await list_prodseller_products()
+        conn = get_db()
+        try:
+            overrides = get_product_overrides(conn)
+        finally:
+            conn.close()
+    except ProdSellerError as exc:
+        await query.edit_message_text(
+            f"❌ Could not load ProdSeller products:\n\n{escape(exc.message)}",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="admin_products")]]),
+        )
+        return
+
+    if not products:
+        text = "🔌 <b>ProdSeller Products</b>\n\nNo active supplier products found."
+        buttons = []
+    else:
+        lines = []
+        buttons = []
+        for raw_product in products:
+            product_id = str(raw_product.get("id") or "")
+            if not product_id:
+                continue
+            product = apply_product_override(raw_product, overrides)
+            stock = "Out of Stock" if raw_product.get("inStock") is False else "In Stock"
+            lines.append(
+                f"{emoji_for_html(product.get('emoji', '📦'))} <b>{escape(str(product.get('name') or 'Product'))}</b>\n"
+                f"   Cost: ${float(product.get('supplier_price', 0)):.2f} | Sell: ${float(product.get('price', 0)):.2f} | {stock}"
+            )
+            buttons.append([InlineKeyboardButton(
+                f"{emoji_for_button(product.get('emoji', '📦'))} {str(product.get('name') or 'Product')[:35]}",
+                callback_data=f"admin_ps_edit_{product_id}",
+            )])
+        text = "🔌 <b>ProdSeller Products</b>\n\n" + "\n".join(lines)
+
+    buttons.append([InlineKeyboardButton("🔙 Back", callback_data="admin_products")])
+    await query.edit_message_text(
+        text + "\n\n<i>Select a product to set its selling price or premium emoji.</i>",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+
+
+async def admin_prodseller_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show price and emoji controls for one supplier product."""
+    query = update.callback_query
+    await query.answer()
+    data = query.data or ""
+    if data.startswith("admin_ps_edit_"):
+        product_id = data[len("admin_ps_edit_"):]
+    elif data.startswith("admin_ps_reset_price_"):
+        product_id = data[len("admin_ps_reset_price_"):]
+    else:
+        product_id = data[len("admin_ps_reset_emoji_"):]
+    try:
+        product = await get_prodseller_product(product_id)
+        conn = get_db()
+        try:
+            overrides = get_product_overrides(conn)
+        finally:
+            conn.close()
+    except ProdSellerError as exc:
+        await query.edit_message_text(
+            f"❌ {escape(exc.message)}",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="admin_prodseller_products")]]),
+        )
+        return
+
+    product = apply_product_override(product, overrides)
+    name = escape(str(product.get("name") or "Product"))
+    emoji = product.get("emoji", "📦")
+    price_override = (overrides.get(str(product_id)) or {}).get("price")
+    emoji_override = (overrides.get(str(product_id)) or {}).get("emoji")
+    text = (
+        f"🔌 <b>{name}</b>\n\n"
+        f"Supplier cost: <b>${float(product.get('supplier_price', 0)):.2f}</b>\n"
+        f"Selling price: <b>${float(product.get('price', 0)):.2f}</b>\n"
+        f"Profit per item: <b>${float(product.get('price', 0)) - float(product.get('supplier_price', 0)):.2f}</b>\n"
+        f"Emoji: {emoji_for_html(emoji)}\n"
+        f"Price override: {'Yes' if price_override is not None else 'No'}\n"
+        f"Emoji override: {'Yes' if emoji_override else 'No'}"
+    )
+    keyboard = [
+        [InlineKeyboardButton("💰 Set Selling Price", callback_data=f"admin_ps_price_{product_id}")],
+        [InlineKeyboardButton("🎨 Set Premium Emoji", callback_data=f"admin_ps_emoji_{product_id}")],
+        [InlineKeyboardButton("↩️ Reset Price", callback_data=f"admin_ps_reset_price_{product_id}"),
+         InlineKeyboardButton("↩️ Reset Emoji", callback_data=f"admin_ps_reset_emoji_{product_id}")],
+        [InlineKeyboardButton("🔙 Back", callback_data="admin_prodseller_products")],
+    ]
+    await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def admin_prodseller_set_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    product_id = (query.data or "").replace("admin_ps_price_", "", 1)
+    try:
+        product = await get_prodseller_product(product_id)
+        supplier_price = float(product.get("price", 0))
+    except (ProdSellerError, TypeError, ValueError) as exc:
+        message = exc.message if isinstance(exc, ProdSellerError) else "Invalid supplier price."
+        await query.edit_message_text(f"❌ {escape(message)}", reply_markup=_back_button("admin_prodseller_products"))
+        return
+    context.user_data["admin_state"] = "ps_price"
+    context.user_data["admin_data"] = {"ps_product_id": product_id, "ps_supplier_price": supplier_price}
+    await query.edit_message_text(
+        f"💰 <b>Set selling price</b>\n\n"
+        f"Supplier cost: <b>${supplier_price:.2f}</b>\n"
+        "Send the customer selling price. It must be at least the supplier cost:",
+        parse_mode="HTML",
+        reply_markup=_cancel_button(f"admin_ps_edit_{product_id}"),
+    )
+
+
+async def admin_prodseller_set_emoji(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    product_id = (query.data or "").replace("admin_ps_emoji_", "", 1)
+    context.user_data["admin_state"] = "ps_emoji"
+    context.user_data["admin_data"] = {"ps_product_id": product_id}
+    await query.edit_message_text(
+        "🎨 <b>Set product emoji</b>\n\n"
+        "Send a premium Telegram emoji. Normal Unicode emoji is also supported.",
+        parse_mode="HTML",
+        reply_markup=_cancel_button(f"admin_ps_edit_{product_id}"),
+    )
+
+
+async def admin_prodseller_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    data = query.data or ""
+    field = "price" if data.startswith("admin_ps_reset_price_") else "emoji"
+    product_id = data.replace(f"admin_ps_reset_{field}_", "", 1)
+    conn = get_db()
+    try:
+        save_product_override(conn, product_id, **{field: None})
+    finally:
+        conn.close()
+    await admin_prodseller_edit(update, context)
 
 
 async def admin_add_product_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3582,8 +3750,54 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if not state:
         return  # Not in admin mode
 
+    # --- ProdSeller selling price ---
+    if state == "ps_price":
+        product_id = str(data.get("ps_product_id") or "")
+        try:
+            price = float(text)
+            supplier_price = float(data.get("ps_supplier_price", 0))
+            if price <= 0 or price < supplier_price:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_html(
+                f"❌ Price must be at least <b>${float(data.get('ps_supplier_price', 0)):.2f}</b>. Try again:",
+                reply_markup=_cancel_button(f"admin_ps_edit_{product_id}"),
+            )
+            return
+        conn = get_db()
+        try:
+            save_product_override(conn, product_id, price=price)
+        finally:
+            conn.close()
+        context.user_data.pop("admin_state", None)
+        context.user_data.pop("admin_data", None)
+        await update.message.reply_html(
+            f"✅ Selling price saved: <b>${price:.2f}</b>",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔌 Back to ProdSeller Product", callback_data=f"admin_ps_edit_{product_id}")
+            ]]),
+        )
+
+    # --- ProdSeller product emoji ---
+    elif state == "ps_emoji":
+        product_id = str(data.get("ps_product_id") or "")
+        emoji = _extract_emoji(update.message)
+        conn = get_db()
+        try:
+            save_product_override(conn, product_id, emoji=emoji)
+        finally:
+            conn.close()
+        context.user_data.pop("admin_state", None)
+        context.user_data.pop("admin_data", None)
+        await update.message.reply_html(
+            f"✅ Product emoji saved: {emoji_for_html(emoji)}",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔌 Back to ProdSeller Product", callback_data=f"admin_ps_edit_{product_id}")
+            ]]),
+        )
+
     # --- Category Name ---
-    if state == "cat_name":
+    elif state == "cat_name":
         if not text:
             await update.message.reply_html("❌ Name cannot be empty. Try again:", reply_markup=_cancel_button())
             return
