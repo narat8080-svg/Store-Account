@@ -2503,21 +2503,24 @@ async def admin_payments(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         pending = r_pending.count or 0
         r_expired = s.table('payments').select('*', count='exact').eq('status', 'expired').execute()
         expired = r_expired.count or 0
+        r_review = s.table('payments').select('*', count='exact').eq('status', 'review').execute()
+        review = r_review.count or 0
     except Exception:
-        total = paid = pending = expired = 0
+        total = paid = pending = expired = review = 0
 
     keyboard = [
         [InlineKeyboardButton(f"📋 All Payments ({total})", callback_data="admin_pay_list_all")],
         [InlineKeyboardButton(f"✅ Paid ({paid})", callback_data="admin_pay_list_paid"),
          InlineKeyboardButton(f"⏳ Pending ({pending})", callback_data="admin_pay_list_pending")],
         [InlineKeyboardButton(f"⏰ Expired ({expired})", callback_data="admin_pay_list_expired")],
+        [InlineKeyboardButton("⚠️ Review ({})".format(review), callback_data="admin_pay_list_review")],
         [InlineKeyboardButton("🔙 Back", callback_data="admin_panel")],
     ]
 
     await query.edit_message_text(
         f"💵 <b>Payment Management</b>\n\n"
         f"Total: <b>{total}</b> | Paid: <b>{paid}</b> | "
-        f"Pending: <b>{pending}</b> | Expired: <b>{expired}</b>",
+        f"Pending: <b>{pending}</b> | Expired: <b>{expired}</b> | Review: <b>{review}</b>",
         parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -2558,7 +2561,14 @@ async def admin_pay_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         uid = str(p.get('user_id', ''))
         amt = p.get('amount', 0)
         status = p.get('status', '?')
-        status_icon = {"paid": "✅", "pending": "⏳", "expired": "⏰"}.get(status, "❓")
+        status_icon = {
+            "paid": "✅",
+            "pending": "⏳",
+            "expired": "⏰",
+            "review": "⚠️",
+            "wallet_credited": "💳",
+            "wallet_credit_pending": "⏳",
+        }.get(status, "❓")
         lines.append(
             f"<pre>#{p['id']:<5} {uid:<14} ${amt:<7.2f} {status_icon} {status:<8}</pre>"
         )

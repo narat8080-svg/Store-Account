@@ -15,11 +15,20 @@ import aiohttp
 
 logger = logging.getLogger(__name__)
 
-KHQRPAY_BASE = "https://khqr.cc/api"
+from config import KHQRPAY_BASE_URL
+
+# Current KHQRPay docs use https://khqr.cc/{profile}/... (without /api).
+# KHQRPAY_BASE_URL remains configurable for accounts still using a legacy path.
+KHQRPAY_BASE = KHQRPAY_BASE_URL
 
 
 def _sha1(*parts: str) -> str:
     return hashlib.sha1("".join(parts).encode("utf-8")).hexdigest()
+
+
+def _is_success_code(value) -> bool:
+    """Accept numeric and string success codes returned by gateway versions."""
+    return str(value).strip().lower() in {"0", "00", "success", "ok"}
 
 
 def _api_url(profile_id: str, endpoint: str) -> str:
@@ -67,12 +76,30 @@ async def create_aba_qr(
                 except Exception:
                     return {"success": False, "error": f"Invalid JSON response (HTTP {resp.status})"}
 
-                if data.get("responseCode") == 0 and data.get("data"):
+                if _is_success_code(data.get("responseCode")) and data.get("data"):
                     tx_data = data["data"]
+                    qr_image_url = tx_data.get("qr_url") or tx_data.get("qr_image_url") or ""
+                    qr_text = tx_data.get("qr") or tx_data.get("qr_text") or ""
+                    if not qr_image_url and not qr_text:
+                        return {"success": False, "error": "Gateway returned no QR data"}
+                    if not qr_image_url and qr_text:
+                        # Some gateway responses return only the KHQR payload.
+                        # Render it locally so Telegram still receives a scannable image.
+                        try:
+                            import io
+                            import qrcode
+
+                            qr_buffer = io.BytesIO()
+                            qrcode.make(qr_text).save(qr_buffer, format="PNG")
+                            qr_buffer.seek(0)
+                            qr_buffer.name = "khqr.png"
+                            qr_image_url = qr_buffer
+                        except Exception as exc:
+                            logger.warning("Could not render gateway QR payload locally: %s", exc)
                     return {
                         "success": True,
-                        "qr_image_url": tx_data.get("qr_url", ""),
-                        "qr_text": tx_data.get("qr", ""),
+                        "qr_image_url": qr_image_url,
+                        "qr_text": qr_text,
                         "md5": tx_data.get("md5", ""),
                         "amount": tx_data.get("amount", amount_str),
                         "transaction_id": tx_data.get("transaction_id", transaction_id),
@@ -119,13 +146,20 @@ async def verify_aba_payment(
                 except Exception:
                     return {"success": True, "paid": False}
 
-                if data.get("responseCode") == 0 and data.get("data"):
+                if _is_success_code(data.get("responseCode")) and data.get("data"):
                     tx_data = data["data"]
-                    status = tx_data.get("status", "").lower()
+                    status = str(
+                        tx_data.get("status")
+                        or tx_data.get("transaction_status")
+                        or tx_data.get("payment_status")
+                        or ""
+                    ).strip().lower()
                     return {
                         "success": True,
-                        "paid": status == "success",
-                        "amount": tx_data.get("amount", ""),
+                        "paid": status in {"success", "successful", "paid", "completed", "approved", "00"},
+                        "amount": tx_data.get("amount", tx_data.get("paid_amount", "")),
+                        "currency": tx_data.get("currency", ""),
+                        "status": status,
                     }
 
                 # Non-zero response code — log error for debugging
@@ -169,7 +203,7 @@ def get_khqrpay_config(conn) -> dict:
     from services.database import get_bot_setting
 
     return {
-        "profile_id": get_bot_setting(conn, "khqrpay_profile_id", KHQRPAY_PROFILE_ID or ""),
-        "secret_key": get_bot_setting(conn, "khqrpay_secret_key", KHQRPAY_SECRET_KEY or ""),
-        "aba_url": get_bot_setting(conn, "khqrpay_aba_url", KHQRPAY_ABA_URL or ""),
+        "profile_id": get_bot_setting(conn, "khqrpay_profile_id", "") or KHQRPAY_PROFILE_ID or "",
+        "secret_key": get_bot_setting(conn, "khqrpay_secret_key", "") or KHQRPAY_SECRET_KEY or "",
+        "aba_url": get_bot_setting(conn, "khqrpay_aba_url", "") or KHQRPAY_ABA_URL or "",
     }

@@ -5,6 +5,7 @@ All bot/admin code works unchanged.
 """
 import logging
 import sys
+from datetime import datetime, timezone
 from config import SUPABASE_URL, SUPABASE_KEY
 
 logger = logging.getLogger(__name__)
@@ -100,13 +101,48 @@ def mark_payment_paid(conn, payment_id):
     r = (
         _get_supabase()
         .table('payments')
-        .update({'status': 'paid', 'paid_at': 'now()'})
+        .update({'status': 'paid', 'paid_at': datetime.now(timezone.utc).isoformat()})
         .eq('id', payment_id)
         .eq('status', 'pending')
         .select('id')
         .execute()
     )
     return bool(r.data)
+
+
+def mark_payment_review(conn, payment_id):
+    """Move an untrusted payment to review without crediting or fulfilling it."""
+    r = (
+        _get_supabase()
+        .table('payments')
+        .update({'status': 'review'})
+        .eq('id', payment_id)
+        .eq('status', 'pending')
+        .select('id')
+        .execute()
+    )
+    return bool(r.data)
+
+
+def mark_payment_wallet_credit_pending(conn, payment_id):
+    """Claim a paid payment for one supplier-failure wallet compensation."""
+    r = (
+        _get_supabase()
+        .table('payments')
+        .update({'status': 'wallet_credit_pending'})
+        .eq('id', payment_id)
+        .eq('status', 'paid')
+        .select('id')
+        .execute()
+    )
+    return bool(r.data)
+
+
+def mark_payment_wallet_credited(conn, payment_id):
+    _get_supabase().table('payments').update({'status': 'wallet_credited'}).eq(
+        'id', payment_id
+    ).eq('status', 'wallet_credit_pending').execute()
+
 
 def mark_payment_expired(conn, payment_id):
     _get_supabase().table('payments').update({'status': 'expired'}).eq('id', payment_id).eq('status', 'pending').execute()
@@ -283,6 +319,13 @@ def create_order(conn, user_id, product_id, amount, stock_id=None, promo_code=No
         'original_amount': original_amount or amount, 'status': 'completed'
     }).execute()
     return r.data[0]['id'] if r.data else 0
+
+
+def delete_order(conn, order_id):
+    """Delete an order created by a failed, not-yet-delivered checkout."""
+    if not order_id:
+        return
+    _get_supabase().table('orders').delete().eq('id', order_id).execute()
 
 def get_user_orders(conn, user_id, limit=20, product_id=None):
     """

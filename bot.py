@@ -2,6 +2,7 @@ import asyncio
 import io
 import logging
 import uuid
+from decimal import Decimal, InvalidOperation
 from html import escape
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -40,6 +41,7 @@ from services.database import (
     release_stock_items,
     link_stock_to_order,
     create_order,
+    delete_order,
     get_user_orders,
     get_promo_code,
     use_promo_code,
@@ -330,6 +332,51 @@ async def _notify_new_user(context, user) -> None:
         )
     except Exception as e:
         logger.warning(f"New user notify failed: {e}")
+
+
+def _payment_amount_matches(expected, received) -> bool:
+    """Compare gateway amounts exactly to cents; never trust a paid flag alone."""
+    if received is None or received == "":
+        return False
+    try:
+        expected_value = Decimal(str(expected)).quantize(Decimal("0.01"))
+        received_value = Decimal(str(received)).quantize(Decimal("0.01"))
+        return expected_value == received_value
+    except (InvalidOperation, ValueError, TypeError):
+        return False
+
+
+async def _notify_payment_review(
+    context,
+    user_id: int,
+    payment_id: int,
+    expected_amount,
+    received_amount,
+    reason: str,
+) -> None:
+    """Alert operators when a gateway result is unsafe to auto-credit."""
+    try:
+        from config import PAYMENT_GROUP_ID
+
+        text = (
+            "⚠️ <b>Payment Held for Review</b>\n\n"
+            f"User: <code>{user_id}</code>\n"
+            f"Payment #: <code>{payment_id}</code>\n"
+            f"Expected: <b>${float(expected_amount):.2f}</b>\n"
+            f"Gateway amount: <code>{escape(str(received_amount))}</code>\n"
+            f"Reason: {escape(reason)}\n\n"
+            "No wallet credit or product delivery was performed."
+        )
+        destinations = {int(ADMIN_ID)}
+        if PAYMENT_GROUP_ID:
+            destinations.add(int(PAYMENT_GROUP_ID))
+        for destination in destinations:
+            try:
+                await context.bot.send_message(chat_id=destination, text=text, parse_mode="HTML")
+            except Exception:
+                logger.exception("Could not send payment review alert to %s", destination)
+    except Exception:
+        logger.exception("Payment review alert failed")
 
 
 # ===========================================================================
@@ -869,6 +916,7 @@ async def deposit_create_checkout(update: Update, context: ContextTypes.DEFAULT_
         secret_key=cfg["secret_key"],
         transaction_id=transaction_id,
         amount=amount,
+        success_url=cfg["aba_url"] or "https://t.me/storeaccount_bot",
         remark=f"Deposit for {user.id}",
     )
 
@@ -883,6 +931,13 @@ async def deposit_create_checkout(update: Update, context: ContextTypes.DEFAULT_
     conn = get_db()
     try:
         payment_id = create_payment(conn, user.id, amount, result["qr_text"], transaction_id)
+    except Exception:
+        logger.exception("Could not persist deposit payment before sending QR")
+        await query.edit_message_text(
+            "❌ Could not create a secure payment record. No QR was sent; please try again.",
+            reply_markup=_back_button("menu_wallet"),
+        )
+        return
     finally:
         conn.close()
 
@@ -944,6 +999,35 @@ async def _khqrpay_watcher(
 
         result = await verify_aba_payment(cfg["profile_id"], cfg["secret_key"], transaction_id)
         if result.get("paid"):
+            received_amount = result.get("amount")
+            received_currency = str(result.get("currency") or "").upper()
+            if (
+                not _payment_amount_matches(amount, received_amount)
+                or (received_currency and received_currency not in {"USD", "US DOLLAR"})
+            ):
+                review_conn = get_db()
+                try:
+                    from services.database import mark_payment_review
+                    mark_payment_review(review_conn, payment_id)
+                finally:
+                    review_conn.close()
+                await _notify_payment_review(
+                    context, user_id, payment_id, amount, received_amount,
+                    "Amount or currency did not match the pending deposit.",
+                )
+                try:
+                    await context.bot.edit_message_caption(
+                        chat_id=chat_id, message_id=message_id,
+                        caption=(
+                            f"⚠️ <b>Payment received but held for review.</b>\n\n"
+                            "The amount could not be verified automatically. Please contact support."
+                        ),
+                        parse_mode="HTML",
+                    )
+                except Exception:
+                    pass
+                return
+
             conn = get_db()
             try:
                 # Only the first successful pending→paid transition credits balance
@@ -1229,9 +1313,10 @@ async def _handle_prodseller_qty(update: Update, context: ContextTypes.DEFAULT_T
         f"Quantity: <b>{quantity}</b>\n"
         f"Unit price: <b>${unit_price:.2f}</b>\n"
         f"Total: <b>${total:.2f}</b>\n\n"
-        "Your existing bot Wallet will be charged.",
+        "Choose how the customer will pay:",
         reply_markup=InlineKeyboardMarkup([
-            [_make_smart_button(f"Confirm Order — ${total:.2f}", f"ps_confirm_{product_id}_{quantity}", "confirm")],
+            [_make_smart_button(f"Pay with Wallet — ${total:.2f}", f"ps_wallet_{product_id}_{quantity}", "pay_wallet")],
+            [_make_smart_button(f"Pay with KHQR — ${total:.2f}", f"ps_khqr_{product_id}_{quantity}", "pay_khqr")],
             [_make_smart_button("Cancel", "menu_product", "cancel")],
         ]),
     )
@@ -1241,7 +1326,9 @@ async def prodseller_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     """Charge the customer's bot wallet and create the supplier order."""
     query = update.callback_query
     await query.answer()
-    raw = (query.data or "")[len("ps_confirm_"):]
+    data = query.data or ""
+    prefix = "ps_wallet_" if data.startswith("ps_wallet_") else "ps_confirm_"
+    raw = data[len(prefix):]
     try:
         product_id, quantity_text = raw.rsplit("_", 1)
         quantity = int(quantity_text)
@@ -1435,6 +1522,341 @@ async def prodseller_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
 
 
+def _parse_prodseller_order_cb(data: str, prefix: str) -> tuple[str, int]:
+    raw = data[len(prefix):]
+    product_id, quantity_text = raw.rsplit("_", 1)
+    quantity = int(quantity_text)
+    if not product_id or quantity < 1:
+        raise ValueError
+    return product_id, quantity
+
+
+async def prodseller_khqr_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Create a KHQR payment for a ProdSeller order; supplier ordering follows confirmation."""
+    query = update.callback_query
+    await query.answer()
+    try:
+        product_id, quantity = _parse_prodseller_order_cb(query.data or "", "ps_khqr_")
+    except (ValueError, IndexError):
+        await query.edit_message_text("❌ Invalid supplier payment request.", reply_markup=_back_button("menu_product"))
+        return
+
+    checkout = context.user_data.get("buy_data") or {}
+    if (
+        context.user_data.get("buy_state") != "prodseller_confirm"
+        or str(checkout.get("product_id")) != product_id
+        or int(checkout.get("quantity", 0)) != quantity
+    ):
+        await query.edit_message_text(
+            "❌ This supplier checkout has expired. Please open the shop again.",
+            reply_markup=_back_button("menu_product"),
+        )
+        return
+
+    # Set this before the first await so repeated button taps cannot create
+    # multiple paid QR records for the same checkout.
+    context.user_data["buy_state"] = "prodseller_payment_pending"
+
+    try:
+        product = await get_prodseller_product(product_id)
+        stock_label, stock_limit = _prodseller_stock_label(product)
+        if stock_limit == 0 or (stock_limit is not None and quantity > stock_limit):
+            raise ProdSellerError(f"Only {stock_label} available.", status=409)
+        unit_price = float(product.get("price", 0))
+        if unit_price <= 0:
+            raise ProdSellerError("Supplier returned an invalid product price.", status=502)
+    except (ProdSellerError, ValueError, TypeError) as exc:
+        context.user_data["buy_state"] = "prodseller_confirm"
+        message = _prodseller_error_text(exc) if isinstance(exc, ProdSellerError) else "Invalid supplier price."
+        await query.edit_message_text(f"❌ {escape(message)}", parse_mode="HTML", reply_markup=_back_button("menu_product"))
+        return
+
+    conn = get_db()
+    try:
+        cfg = get_khqrpay_config(conn)
+    finally:
+        conn.close()
+    if not cfg["profile_id"] or not cfg["secret_key"]:
+        context.user_data["buy_state"] = "prodseller_confirm"
+        await query.edit_message_text(
+            "❌ KHQR payment is not configured. Please contact the administrator.",
+            reply_markup=_back_button("menu_product"),
+        )
+        return
+
+    amount = round(unit_price * quantity, 2)
+    transaction_id = f"PS-{uuid.uuid4().hex[:16].upper()}"
+    await query.edit_message_text("⏳ <b>Generating KHQR payment...</b>", parse_mode="HTML")
+    result = await create_aba_qr(
+        profile_id=cfg["profile_id"],
+        secret_key=cfg["secret_key"],
+        transaction_id=transaction_id,
+        amount=amount,
+        success_url=cfg["aba_url"] or "https://t.me/storeaccount_bot",
+        remark=f"ProdSeller: {product.get('name', 'Product')} x{quantity}",
+    )
+    if not result.get("success"):
+        context.user_data["buy_state"] = "prodseller_confirm"
+        await query.edit_message_text(
+            f"❌ <b>KHQR generation failed</b>\n\n{escape(str(result.get('error') or 'Unknown gateway error'))}",
+            parse_mode="HTML",
+            reply_markup=_back_button("menu_product"),
+        )
+        return
+
+    conn = get_db()
+    try:
+        payment_id = create_payment(conn, update.effective_user.id, amount, result.get("qr_text", ""), transaction_id)
+    except Exception:
+        context.user_data["buy_state"] = "prodseller_confirm"
+        logger.exception("Could not persist ProdSeller KHQR payment before sending QR")
+        await query.edit_message_text(
+            "❌ Could not create a secure payment record. No QR was sent; please try again.",
+            reply_markup=_back_button("menu_product"),
+        )
+        return
+    finally:
+        conn.close()
+
+    caption = (
+        f"💳 <b>Pay ${amount:.2f} via KHQR</b>\n\n"
+        f"{escape(str(product.get('name') or 'Product'))} × {quantity}\n"
+        "Scan with ABA Mobile or any Bakong app.\n"
+        "⏳ Expires in: <b>03:00</b>\n\n"
+        "The order is created only after the exact payment is verified."
+    )
+    try:
+        msg = await context.bot.send_photo(
+            chat_id=query.message.chat_id,
+            photo=result.get("qr_image_url") or result.get("qr_text"),
+            caption=caption,
+            parse_mode="HTML",
+        )
+    except Exception:
+        context.user_data["buy_state"] = "prodseller_confirm"
+        logger.exception("Could not send ProdSeller KHQR image for payment %s", payment_id)
+        await query.edit_message_text(
+            "❌ Could not send the QR code. The payment was not shown; please try again.",
+            reply_markup=_back_button("menu_product"),
+        )
+        return
+
+    try:
+        await query.delete_message()
+    except Exception:
+        pass
+
+    asyncio.create_task(_prodseller_khqr_watcher(
+        payment_id=payment_id,
+        cfg=cfg,
+        transaction_id=transaction_id,
+        amount=amount,
+        user_id=update.effective_user.id,
+        chat_id=query.message.chat_id,
+        message_id=msg.message_id,
+        product_id=product_id,
+        quantity=quantity,
+        product_name=str(product.get("name") or "Product"),
+        idempotency_key=f"pskhqr_{update.effective_user.id}_{payment_id}",
+        context=context,
+    ))
+
+
+async def _prodseller_khqr_watcher(
+    payment_id: int,
+    cfg: dict,
+    transaction_id: str,
+    amount: float,
+    user_id: int,
+    chat_id: int,
+    message_id: int,
+    product_id: str,
+    quantity: int,
+    product_name: str,
+    idempotency_key: str,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Verify exact payment, then order from ProdSeller and deliver the keys."""
+    import time
+
+    deadline = time.time() + 180
+    last_update = 0
+    while time.time() < deadline:
+        remaining = int(deadline - time.time())
+        if time.time() - last_update >= 10:
+            mins, secs = divmod(remaining, 60)
+            try:
+                await context.bot.edit_message_caption(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    caption=(
+                        f"💳 <b>Pay ${amount:.2f} via KHQR</b>\n\n"
+                        f"⏳ Expires in: <b>{mins:02d}:{secs:02d}</b>\n"
+                        "The order is created after exact payment verification."
+                    ),
+                    parse_mode="HTML",
+                )
+                last_update = time.time()
+            except Exception:
+                pass
+
+        result = await verify_aba_payment(cfg["profile_id"], cfg["secret_key"], transaction_id)
+        if result.get("paid"):
+            received_amount = result.get("amount")
+            received_currency = str(result.get("currency") or "").upper()
+            if (
+                not _payment_amount_matches(amount, received_amount)
+                or (received_currency and received_currency not in {"USD", "US DOLLAR"})
+            ):
+                conn = get_db()
+                try:
+                    from services.database import mark_payment_review
+                    mark_payment_review(conn, payment_id)
+                finally:
+                    conn.close()
+                await _notify_payment_review(
+                    context, user_id, payment_id, amount, received_amount,
+                    "Amount or currency did not match the supplier order.",
+                )
+                try:
+                    await context.bot.edit_message_caption(
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        caption=(
+                            "⚠️ <b>Payment received but held for review.</b>\n\n"
+                            "The amount could not be verified automatically. Please contact support."
+                        ),
+                        parse_mode="HTML",
+                    )
+                except Exception:
+                    pass
+                return
+
+            conn = get_db()
+            try:
+                from services.database import mark_payment_paid
+                if not mark_payment_paid(conn, payment_id):
+                    return
+            finally:
+                conn.close()
+
+            try:
+                order = await create_prodseller_order(product_id, quantity, idempotency_key)
+            except ProdSellerError as exc:
+                # The customer's payment is never lost if the supplier fails:
+                # atomically claim one wallet compensation, then credit it.
+                credited = False
+                new_balance = None
+                credit_conn = get_db()
+                try:
+                    from services.database import (
+                        add_balance,
+                        mark_payment_wallet_credited,
+                        mark_payment_wallet_credit_pending,
+                    )
+                    if mark_payment_wallet_credit_pending(credit_conn, payment_id):
+                        new_balance = add_balance(credit_conn, user_id, amount)
+                        mark_payment_wallet_credited(credit_conn, payment_id)
+                        credited = True
+                except Exception:
+                    logger.exception("Supplier failure compensation failed for payment %s", payment_id)
+                finally:
+                    credit_conn.close()
+
+                if credited:
+                    try:
+                        await context.bot.send_message(
+                            chat_id=chat_id,
+                            text=(
+                                "⚠️ <b>Supplier temporarily unavailable</b>\n\n"
+                                f"Your payment of <b>${amount:.2f}</b> was converted to Wallet credit.\n"
+                                f"New balance: <b>${float(new_balance):.2f}</b>"
+                            ),
+                            parse_mode="HTML",
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        await context.bot.send_message(
+                            chat_id=ADMIN_ID,
+                            text=(
+                                "⚠️ ProdSeller order failed after KHQR payment.\n"
+                                f"Payment #{payment_id}, user {user_id}, amount ${amount:.2f}.\n"
+                                "Wallet compensation was credited automatically."
+                            ),
+                        )
+                    except Exception:
+                        pass
+                else:
+                    await _notify_payment_review(
+                        context, user_id, payment_id, amount, amount,
+                        f"Supplier order failed: {_prodseller_error_text(exc)}; compensation needs manual review.",
+                    )
+                return
+
+            context.user_data.pop("buy_state", None)
+            context.user_data.pop("buy_data", None)
+            delivered_keys = order.get("deliveredKeys") or []
+            if not delivered_keys and order.get("deliveredKey"):
+                delivered_keys = [order["deliveredKey"]]
+            order_id = escape(str(order.get("orderId") or "unknown"))
+
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+            except Exception:
+                pass
+
+            if delivered_keys:
+                file_content = _format_numbered_accounts([str(k) for k in delivered_keys])
+                file_bytes = io.BytesIO(file_content.encode("utf-8"))
+                file_bytes.name = f"{product_name.replace(' ', '_')}_{quantity}x.txt"
+                await context.bot.send_document(
+                    chat_id=chat_id,
+                    document=file_bytes,
+                    caption=(
+                        "✅ <b>Purchase Successful!</b>\n\n"
+                        f"{escape(product_name)} × {quantity}\n"
+                        f"Paid: <b>${amount:.2f}</b>\n"
+                        f"Supplier order: <code>{order_id}</code>"
+                    ),
+                    parse_mode="HTML",
+                )
+                delivery_note = f"📄 {len(delivered_keys)} key(s) sent as a file."
+            else:
+                delivery_note = (
+                    f"Supplier status: <b>{escape(str(order.get('status') or 'pending'))}</b>. "
+                    "Delivery is still being processed."
+                )
+                await context.bot.send_message(chat_id=chat_id, text=delivery_note, parse_mode="HTML")
+
+            await _notify_order_group(
+                context,
+                user=None,
+                prod={"name": product_name},
+                qty=quantity,
+                total=amount,
+                pay_method="ProdSeller + KHQR",
+                user_id=user_id,
+            )
+            await _notify_payment_group(
+                context, user_id, amount, payment_id, method="ProdSeller + KHQR"
+            )
+            return
+
+        await asyncio.sleep(5)
+
+    conn = get_db()
+    try:
+        from services.database import mark_payment_expired
+        mark_payment_expired(conn, payment_id)
+    finally:
+        conn.close()
+    try:
+        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception:
+        pass
+
+
 # ===========================================================================
 # BUY FLOW
 # ===========================================================================
@@ -1522,6 +1944,8 @@ def _parse_pay_cb(data: str, prefix: str) -> tuple[int, int, int | None]:
     parts = body.split("_")
     prod_id = int(parts[0])
     qty = int(parts[1])
+    if prod_id < 1 or qty < 1:
+        raise ValueError("invalid product or quantity")
     promo_id = None
     if len(parts) >= 4 and parts[2] == "promo":
         try:
@@ -1655,6 +2079,7 @@ async def buy_execute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     promo_data = None
     discount = 0
     claimed = []
+    created_order_ids = []
     details = []
     new_balance = 0.0
 
@@ -1717,12 +2142,13 @@ async def buy_execute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             # Delivery uses only these details — never a re-fetch of "next available".
             if is_unlimited:
                 for _ in range(qty):
-                    create_order(
+                    order_id = create_order(
                         conn, user.id, prod_id, unit_price,
                         stock_id=None,
                         promo_code=promo_data["code"] if promo_data else None,
                         original_amount=price,
                     )
+                    created_order_ids.append(order_id)
             else:
                 for item in claimed:
                     details.append(item["detail"])
@@ -1732,11 +2158,17 @@ async def buy_execute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                         promo_code=promo_data["code"] if promo_data else None,
                         original_amount=price,
                     )
+                    created_order_ids.append(order_id)
                     link_stock_to_order(conn, item["id"], order_id)
 
             new_balance = balance - total_price
         except Exception:
             # Roll back claim + charge so no user is left with wrong/missing accounts
+            for order_id in created_order_ids:
+                try:
+                    delete_order(conn, order_id)
+                except Exception:
+                    logger.exception("Could not delete incomplete order %s during rollback", order_id)
             if claimed:
                 try:
                     release_stock_items(conn, [c["id"] for c in claimed])
@@ -1904,6 +2336,7 @@ async def pay_khqr_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         secret_key=cfg["secret_key"],
         transaction_id=transaction_id,
         amount=total_price,
+        success_url=cfg["aba_url"] or "https://t.me/storeaccount_bot",
         remark=f"Order: {prod['name']} x{qty}",
     )
 
@@ -1917,6 +2350,13 @@ async def pay_khqr_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     conn = get_db()
     try:
         payment_id = create_payment(conn, user.id, total_price, result["qr_text"], transaction_id)
+    except Exception:
+        logger.exception("Could not persist order payment before sending QR")
+        await query.edit_message_text(
+            "❌ Could not create a secure payment record. No QR was sent; please try again.",
+            reply_markup=_back_button("menu_product"),
+        )
+        return
     finally:
         conn.close()
 
@@ -1967,7 +2407,14 @@ async def _khqrpay_order_watcher(
 ) -> None:
     """Poll ABA Pay for order payment; on success, assign stock and deliver."""
     import time
-    from services.database import mark_payment_paid, mark_payment_expired
+    from services.database import (
+        add_balance,
+        delete_order,
+        mark_payment_expired,
+        mark_payment_paid,
+        mark_payment_wallet_credited,
+        mark_payment_wallet_credit_pending,
+    )
 
     deadline = time.time() + 180
     last_update = 0
@@ -1993,8 +2440,38 @@ async def _khqrpay_order_watcher(
 
         result = await verify_aba_payment(cfg["profile_id"], cfg["secret_key"], transaction_id)
         if result.get("paid"):
+            received_amount = result.get("amount")
+            received_currency = str(result.get("currency") or "").upper()
+            if (
+                not _payment_amount_matches(amount, received_amount)
+                or (received_currency and received_currency not in {"USD", "US DOLLAR"})
+            ):
+                review_conn = get_db()
+                try:
+                    from services.database import mark_payment_review
+                    mark_payment_review(review_conn, payment_id)
+                finally:
+                    review_conn.close()
+                await _notify_payment_review(
+                    context, user_id, payment_id, amount, received_amount,
+                    "Amount or currency did not match the pending order.",
+                )
+                try:
+                    await context.bot.edit_message_caption(
+                        chat_id=chat_id, message_id=message_id,
+                        caption=(
+                            f"⚠️ <b>Payment received but held for review.</b>\n\n"
+                            "The amount could not be verified automatically. Please contact support."
+                        ),
+                        parse_mode="HTML",
+                    )
+                except Exception:
+                    pass
+                return
+
             conn = get_db()
             claimed = []
+            created_order_ids = []
             details = []
             try:
                 # First poller to mark paid wins — blocks double delivery of accounts
@@ -2008,14 +2485,22 @@ async def _khqrpay_order_watcher(
                 if not is_unlimited:
                     claimed = claim_stock_items(conn, prod_id, qty)
                     if len(claimed) < qty:
-                        add_balance(conn, user_id, amount)
+                        if mark_payment_wallet_credit_pending(conn, payment_id):
+                            new_balance = add_balance(conn, user_id, amount)
+                            mark_payment_wallet_credited(conn, payment_id)
+                        else:
+                            new_balance = None
                         try:
                             await context.bot.edit_message_caption(
                                 chat_id=chat_id, message_id=message_id,
                                 caption=(
                                     f"{E('warning')} <b>Out of Stock After Payment</b>\n\n"
                                     f"We received your ${amount:.2f} but stock ran out. "
-                                    f"Credited to your wallet."
+                                    + (
+                                        f"Credited to your wallet (new balance ${new_balance:.2f})."
+                                        if new_balance is not None
+                                        else "Your payment is held for manual review."
+                                    )
                                 ),
                                 parse_mode="HTML",
                             )
@@ -2028,10 +2513,11 @@ async def _khqrpay_order_watcher(
 
                 if is_unlimited:
                     for _ in range(qty):
-                        create_order(conn, user_id, prod_id, unit_price,
+                        order_id = create_order(conn, user_id, prod_id, unit_price,
                                      stock_id=None,
                                      promo_code=promo_data["code"] if promo_data else None,
                                      original_amount=original_price)
+                        created_order_ids.append(order_id)
                 else:
                     for item in claimed:
                         details.append(item["detail"])
@@ -2041,14 +2527,49 @@ async def _khqrpay_order_watcher(
                             promo_code=promo_data["code"] if promo_data else None,
                             original_amount=original_price,
                         )
+                        created_order_ids.append(order_id)
                         link_stock_to_order(conn, item["id"], order_id)
             except Exception:
+                for order_id in created_order_ids:
+                    try:
+                        delete_order(conn, order_id)
+                    except Exception:
+                        logger.exception("Could not delete incomplete paid order %s", order_id)
                 if claimed:
                     try:
                         release_stock_items(conn, [c["id"] for c in claimed])
                     except Exception:
                         pass
-                raise
+                compensated = False
+                try:
+                    if mark_payment_wallet_credit_pending(conn, payment_id):
+                        add_balance(conn, user_id, amount)
+                        mark_payment_wallet_credited(conn, payment_id)
+                        compensated = True
+                except Exception:
+                    logger.exception("Paid order rollback compensation failed for payment %s", payment_id)
+                try:
+                    await context.bot.edit_message_caption(
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        caption=(
+                            "⚠️ <b>Order fulfillment failed.</b>\n\n"
+                            + (
+                                f"${amount:.2f} was credited to your Wallet. Please retry."
+                                if compensated
+                                else "Your payment is held for manual review. Please contact support."
+                            )
+                        ),
+                        parse_mode="HTML",
+                    )
+                except Exception:
+                    pass
+                if not compensated:
+                    await _notify_payment_review(
+                        context, user_id, payment_id, amount, amount,
+                        "Paid order fulfillment failed and automatic compensation failed.",
+                    )
+                return
             finally:
                 conn.close()
 
@@ -2635,7 +3156,9 @@ async def _route_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, da
     # --- Buy Flow ---
     elif data.startswith("ps_product_"):
         await prodseller_buy_detail(update, context)
-    elif data.startswith("ps_confirm_"):
+    elif data.startswith("ps_khqr_"):
+        await prodseller_khqr_start(update, context)
+    elif data.startswith("ps_wallet_") or data.startswith("ps_confirm_"):
         await prodseller_order(update, context)
     elif data.startswith("buy_detail_"):
         await buy_detail(update, context)

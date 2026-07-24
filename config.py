@@ -34,6 +34,7 @@ BAKONG_CHECK_PAYMENT_URL = "https://api-bakong.nbc.gov.kh/v1/khqr/check"
 # Supports Bakong KHQR + ABA Pay + Binance via unified checkout
 # Admin can override these via bot_settings → 💳 Payment Gateway
 # ---------------------------------------------------------------------------
+KHQRPAY_BASE_URL = os.getenv("KHQRPAY_BASE_URL", "https://khqr.cc").rstrip("/")
 KHQRPAY_PROFILE_ID = os.getenv("KHQRPAY_PROFILE_ID", "")
 KHQRPAY_SECRET_KEY = os.getenv("KHQRPAY_SECRET_KEY", "")
 KHQRPAY_ABA_URL = os.getenv("KHQRPAY_ABA_URL", "")
