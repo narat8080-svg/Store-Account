@@ -1482,7 +1482,12 @@ async def prodseller_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             f"tg_{user_id}_{uuid.uuid4().hex}"
         )
         try:
-            order = await create_prodseller_order(product_id, quantity, idempotency_key)
+            order = await create_prodseller_order(
+                product_id,
+                quantity,
+                idempotency_key,
+                customer_reference=f"telegram_user_{user_id}",
+            )
         except ProdSellerError as exc:
             # Supplier failure means the customer's wallet must be restored.
             refund_ok = True
@@ -1512,19 +1517,11 @@ async def prodseller_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             )
             return
 
-        # ProdSeller may apply a bulk discount after the product lookup.
-        try:
-            actual_amount = float(order.get("amount", total))
-        except (TypeError, ValueError):
-            actual_amount = total
-        if actual_amount < total:
-            refund_conn = get_db()
-            try:
-                new_balance = add_balance(refund_conn, user_id, round(total - actual_amount, 2))
-            finally:
-                refund_conn.close()
-        else:
-            new_balance = float(new_balance)
+        # The new reseller API's amount_usd is the supplier's wallet debit,
+        # not a customer discount. The customer was charged the configured
+        # selling price above, so never refund the reseller margin here.
+        actual_amount = total
+        new_balance = float(new_balance)
 
         context.user_data.pop("buy_state", None)
         context.user_data.pop("buy_data", None)
@@ -1806,7 +1803,12 @@ async def _prodseller_khqr_watcher(
                 conn.close()
 
             try:
-                order = await create_prodseller_order(product_id, quantity, idempotency_key)
+                order = await create_prodseller_order(
+                    product_id,
+                    quantity,
+                    idempotency_key,
+                    customer_reference=f"telegram_user_{user_id}",
+                )
             except ProdSellerError as exc:
                 # The customer's payment is never lost if the supplier fails:
                 # atomically claim one wallet compensation, then credit it.

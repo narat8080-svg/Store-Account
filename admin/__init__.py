@@ -83,6 +83,7 @@ from services.prodseller import (
     apply_product_override,
     get_product_overrides,
     get_product as get_prodseller_product,
+    get_reseller_account,
     is_configured as prodseller_configured,
     list_products as list_prodseller_products,
     save_product_override,
@@ -457,6 +458,7 @@ async def admin_prodseller_products(update: Update, context: ContextTypes.DEFAUL
         return
 
     try:
+        account = await get_reseller_account()
         products = await list_prodseller_products()
         conn = get_db()
         try:
@@ -471,8 +473,18 @@ async def admin_prodseller_products(update: Update, context: ContextTypes.DEFAUL
         )
         return
 
+    account_name = escape(str(account.get("key_name") or account.get("username") or "Reseller"))
+    try:
+        wallet_balance = float(account.get("wallet_balance", 0))
+    except (TypeError, ValueError):
+        wallet_balance = 0.0
+    account_line = (
+        f"\n<b>Reseller account:</b> {account_name}"
+        f"\n<b>Wallet balance:</b> ${wallet_balance:.2f}\n"
+    )
+
     if not products:
-        text = "🔌 <b>ProdSeller Products</b>\n\nNo active supplier products found."
+        text = "🔌 <b>Reseller Products</b>\n" + account_line + "\nNo active supplier products found."
         buttons = []
     else:
         lines = []
@@ -491,7 +503,7 @@ async def admin_prodseller_products(update: Update, context: ContextTypes.DEFAUL
                 f"{emoji_for_button(product.get('emoji', '📦'))} {str(product.get('name') or 'Product')[:35]}",
                 callback_data=f"admin_ps_edit_{product_id}",
             )])
-        text = "🔌 <b>ProdSeller Products</b>\n\n" + "\n".join(lines)
+        text = "🔌 <b>Reseller Products</b>\n" + account_line + "\n" + "\n".join(lines)
 
     buttons.append([InlineKeyboardButton("🔙 Back", callback_data="admin_products")])
     await query.edit_message_text(
