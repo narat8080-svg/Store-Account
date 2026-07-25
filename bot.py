@@ -1089,15 +1089,10 @@ async def _khqrpay_watcher(
 # ===========================================================================
 # PRODUCT BROWSING (User-facing)
 # ===========================================================================
-async def product_categories(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    *,
-    force_refresh: bool = False,
-) -> None:
+async def product_categories(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Show the local catalog and, when configured, the live ProdSeller catalog.
-    ProdSeller products use a separate callback prefix and purchase flow because
+    Show the local catalog and, when configured, the live partner catalog.
+    Partner products use a separate callback prefix and purchase flow because
     their stock and order IDs come from the supplier API.
     """
     query = update.callback_query
@@ -1115,7 +1110,7 @@ async def product_categories(
     supplier_error = None
     if prodseller_configured():
         try:
-            supplier_products = await list_prodseller_products(force_refresh=force_refresh)
+            supplier_products = await list_prodseller_products()
             conn = get_db()
             try:
                 supplier_overrides = get_product_overrides(conn)
@@ -1144,7 +1139,7 @@ async def product_categories(
     text_sections = [f"{E('product')} <b>Products</b>"]
 
     if supplier_products:
-        text_sections.append("\n<b>ProdSeller Products</b>")
+        text_sections.append("\n<b>Available Products</b>")
         for p in supplier_products:
             product_id = str(p.get("id") or "").strip()
             if not product_id:
@@ -1201,7 +1196,7 @@ async def product_categories(
     buttons.append([_make_smart_button("Back", "menu_start", "back")])
 
     if supplier_error:
-        text_sections.append(f"\n<i>ProdSeller is temporarily unavailable: {escape(supplier_error)}</i>")
+        text_sections.append(f"\n<i>Product service is temporarily unavailable: {escape(supplier_error)}</i>")
 
     await query.edit_message_text(
         "\n".join(text_sections) + "\n\nTap a product to buy:\n<i>Stock is shown next to each product.</i>",
@@ -1253,7 +1248,7 @@ def _prodseller_error_text(exc: ProdSellerError) -> str:
 
 
 async def prodseller_buy_detail(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show a live ProdSeller product and ask for quantity."""
+    """Show a live partner product and ask for quantity."""
     query = update.callback_query
     await query.answer()
     product_id = (query.data or "")[len("ps_product_"):].strip()
@@ -1365,7 +1360,7 @@ async def _handle_prodseller_qty(update: Update, context: ContextTypes.DEFAULT_T
     context.user_data["prodseller_idempotency_key"] = f"tg_{update.effective_user.id}_{uuid.uuid4().hex}"
 
     await update.message.reply_html(
-        f"✅ <b>Review ProdSeller Order</b>\n\n"
+        f"✅ <b>Review Order</b>\n\n"
         f"Product: <b>{escape(str(product.get('name') or 'Product'))}</b>\n"
         f"Quantity: <b>{quantity}</b>\n"
         f"Unit price: <b>${unit_price:.2f}</b>\n"
@@ -1581,7 +1576,7 @@ async def prodseller_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                         refund_conn.close()
                 except Exception:
                     refund_ok = False
-                    logger.exception("ProdSeller order failed and automatic wallet refund failed for user %s", user_id)
+                    logger.exception("Product service order failed and automatic wallet refund failed for user %s", user_id)
             context.user_data.pop("buy_state", None)
             context.user_data.pop("buy_data", None)
             context.user_data.pop("prodseller_idempotency_key", None)
@@ -1654,7 +1649,7 @@ async def prodseller_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             quantity,
             actual_amount,
             new_balance,
-            pay_method="ProdSeller + Wallet",
+            pay_method="Partner API + Wallet",
         )
 
 
@@ -1668,7 +1663,7 @@ def _parse_prodseller_order_cb(data: str, prefix: str) -> tuple[str, int]:
 
 
 async def prodseller_khqr_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Create a KHQR payment for a ProdSeller order; supplier ordering follows confirmation."""
+    """Create a KHQR payment for a partner order; supplier ordering follows confirmation."""
     query = update.callback_query
     await query.answer()
     try:
@@ -1736,7 +1731,7 @@ async def prodseller_khqr_start(update: Update, context: ContextTypes.DEFAULT_TY
         transaction_id=transaction_id,
         amount=amount,
         success_url=cfg["aba_url"] or "https://t.me/storeaccount_bot",
-        remark=f"ProdSeller: {product.get('name', 'Product')} x{quantity}",
+        remark=f"Store: {product.get('name', 'Product')} x{quantity}",
     )
     if not result.get("success"):
         context.user_data["buy_state"] = "prodseller_review"
@@ -1752,7 +1747,7 @@ async def prodseller_khqr_start(update: Update, context: ContextTypes.DEFAULT_TY
         payment_id = create_payment(conn, update.effective_user.id, amount, result.get("qr_text", ""), transaction_id)
     except Exception:
         context.user_data["buy_state"] = "prodseller_review"
-        logger.exception("Could not persist ProdSeller KHQR payment before sending QR")
+        logger.exception("Could not persist product payment before sending QR")
         await query.edit_message_text(
             "❌ Could not create a secure payment record. No QR was sent; please try again.",
             reply_markup=_back_button("menu_product"),
@@ -1777,7 +1772,7 @@ async def prodseller_khqr_start(update: Update, context: ContextTypes.DEFAULT_TY
         )
     except Exception:
         context.user_data["buy_state"] = "prodseller_review"
-        logger.exception("Could not send ProdSeller KHQR image for payment %s", payment_id)
+        logger.exception("Could not send product KHQR image for payment %s", payment_id)
         await query.edit_message_text(
             "❌ Could not send the QR code. The payment was not shown; please try again.",
             reply_markup=_back_button("menu_product"),
@@ -1819,7 +1814,7 @@ async def _prodseller_khqr_watcher(
     idempotency_key: str,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
-    """Verify exact payment, then order from ProdSeller and deliver the keys."""
+    """Verify exact payment, then order from the product service and deliver the keys."""
     import time
 
     deadline = time.time() + 180
@@ -1928,7 +1923,7 @@ async def _prodseller_khqr_watcher(
                         await context.bot.send_message(
                             chat_id=ADMIN_ID,
                             text=(
-                                "⚠️ ProdSeller order failed after KHQR payment.\n"
+                "⚠️ Product order failed after KHQR payment.\n"
                                 f"Payment #{payment_id}, user {user_id}, amount ${amount:.2f}.\n"
                                 "Wallet compensation was credited automatically."
                             ),
@@ -1983,11 +1978,11 @@ async def _prodseller_khqr_watcher(
                 prod={"name": product_name},
                 qty=quantity,
                 total=amount,
-                pay_method="ProdSeller + KHQR",
+                pay_method="Partner API + KHQR",
                 user_id=user_id,
             )
             await _notify_payment_group(
-                context, user_id, amount, payment_id, method="ProdSeller + KHQR"
+                context, user_id, amount, payment_id, method="Partner API + KHQR"
             )
             return
 
@@ -3299,7 +3294,7 @@ async def _route_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, da
     elif data == "menu_product":
         await product_categories(update, context)
     elif data == "product_refresh":
-        await product_categories(update, context, force_refresh=True)
+        await product_categories(update, context)
     elif data.startswith("prod_cat_"):
         await product_categories(update, context)
 

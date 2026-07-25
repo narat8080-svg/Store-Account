@@ -9,7 +9,6 @@ import asyncio
 import hashlib
 import json
 import logging
-from urllib.parse import urlencode
 
 import aiohttp
 

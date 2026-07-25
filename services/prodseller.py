@@ -16,8 +16,6 @@ from config import PRODSELLER_API_BASE_URL, PRODSELLER_API_KEY
 logger = logging.getLogger(__name__)
 PRODSELLER_OVERRIDES_KEY = "prodseller_product_overrides"
 _UNSET = object()
-_catalog_cache: list[dict] | None = None
-_catalog_etag: str | None = None
 
 _EMOJI_NAMES = {
     "bolt": "⚡",
@@ -34,7 +32,7 @@ _EMOJI_NAMES = {
 
 
 class ProdSellerError(Exception):
-    """An API or transport error returned by ProdSeller."""
+    """An API or transport error returned by the product service."""
 
     def __init__(self, message: str, status: int = 0, retryable: bool = False):
         super().__init__(message)
@@ -117,7 +115,7 @@ def get_product_overrides(conn) -> dict:
     try:
         value = json.loads(raw) if isinstance(raw, str) else raw
     except (TypeError, ValueError):
-        logger.warning("Invalid ProdSeller product overrides; using defaults")
+        logger.warning("Invalid product overrides; using defaults")
         return {}
     return value if isinstance(value, dict) else {}
 
@@ -175,10 +173,9 @@ async def _request(
     payload: dict | None = None,
     idempotency_key: str | None = None,
     query: dict | None = None,
-    extra_headers: dict | None = None,
 ) -> dict:
     if not is_configured():
-        raise ProdSellerError("ProdSeller API is not configured.", status=0)
+        raise ProdSellerError("Product service is not configured.", status=0)
 
     headers = {
         "X-Reseller-Key": PRODSELLER_API_KEY,
@@ -188,9 +185,6 @@ async def _request(
         headers["Content-Type"] = "application/json"
     if idempotency_key:
         headers["Idempotency-Key"] = idempotency_key[:100]
-    if extra_headers:
-        headers.update(extra_headers)
-
     url = f"{_api_root()}/{path.lstrip('/')}"
     if query:
         url = f"{url}?{urlencode(query)}"
@@ -205,7 +199,7 @@ async def _request(
                     data = {"error": (await response.text())[:200]}
     except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
         raise ProdSellerError(
-            "ProdSeller is temporarily unreachable. Please try again.",
+            "Product service is temporarily unreachable. Please try again.",
             retryable=True,
         ) from exc
 
@@ -222,7 +216,7 @@ async def _request(
         )
 
     if not isinstance(data, dict):
-        raise ProdSellerError("ProdSeller returned an invalid response.", status=response.status)
+        raise ProdSellerError("Product service returned an invalid response.", status=response.status)
     return data
 
 
@@ -231,41 +225,21 @@ async def get_reseller_account() -> dict:
     return await _request("GET", "/me")
 
 
-async def get_wallet_balance() -> float:
-    account = await get_reseller_account()
-    try:
-        return float(account.get("wallet_balance", 0))
-    except (TypeError, ValueError):
-        raise ProdSellerError("Reseller API returned an invalid wallet balance.", status=502)
-
-
-async def list_products(*, force_refresh: bool = False) -> list[dict]:
-    global _catalog_cache, _catalog_etag
-    if force_refresh:
-        # A user-facing refresh must not reuse a previously cached catalog or
-        # conditional request state.  The next response becomes the new cache.
-        _catalog_cache = None
-        _catalog_etag = None
-    headers = {"If-None-Match": _catalog_etag} if _catalog_etag else None
-    try:
-        data = await _request("GET", "/products", query={"lang": "en"}, extra_headers=headers)
-    except ProdSellerError as exc:
-        if exc.status == 304 and _catalog_cache is not None:
-            return [dict(p) for p in _catalog_cache]
-        raise
+async def list_products() -> list[dict]:
+    data = await _request("GET", "/products", query={"lang": "en"})
     products = data.get("products", [])
     if not isinstance(products, list):
-        raise ProdSellerError("ProdSeller returned an invalid product list.", status=502)
+        raise ProdSellerError("Product service returned an invalid product list.", status=502)
     # The reseller catalog includes a synthetic API test product. It must
     # never be exposed to Telegram customers or admin selling controls.
-    _catalog_cache = [
+    products = [
         _normalise_product(p)
         for p in products
         if isinstance(p, dict)
         and not p.get("api_test", False)
         and str(p.get("name") or "").strip().lower() != "ventebot api test product"
     ]
-    return [dict(p) for p in _catalog_cache]
+    return [dict(p) for p in products]
 
 
 async def get_product(product_id: str) -> dict:
@@ -274,13 +248,6 @@ async def get_product(product_id: str) -> dict:
         if str(product.get("id")) == product_id:
             return product
     raise ProdSellerError("Product not found.", status=404)
-
-
-async def quote_product(product_id: str, quantity: int) -> dict:
-    data = await _request(
-        "POST", "/quote", payload={"product_id": int(product_id), "quantity": int(quantity)}
-    )
-    return data.get("quote", data)
 
 
 async def create_order(
@@ -313,18 +280,4 @@ async def create_order(
             if not exc.retryable or attempt == 1:
                 raise
             await asyncio.sleep(0.5)
-    raise last_error or ProdSellerError("ProdSeller order failed.")
-
-
-async def get_order(order_id: int | str) -> dict:
-    data = await _request("GET", f"/orders/{int(order_id)}")
-    return _normalise_order(data)
-
-
-async def submit_activation_identifier(order_id: int | str, activation_identifier: str) -> dict:
-    data = await _request(
-        "POST",
-        f"/orders/{int(order_id)}/activation-identifier",
-        payload={"activation_identifier": activation_identifier},
-    )
-    return _normalise_order(data)
+    raise last_error or ProdSellerError("Product service order failed.")

@@ -83,8 +83,8 @@ SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 
 # ---------------------------------------------------------------------------
-# ProdSeller supplier API
-# Customers pay from the bot wallet; ProdSeller supplies and delivers keys.
+# Partner product API
+# Customers pay from the bot wallet; the product service supplies and delivers keys.
 # ---------------------------------------------------------------------------
 PRODSELLER_API_BASE_URL = os.getenv(
     "PRODSELLER_API_BASE_URL", "https://ventetelegrambotrailway-production.up.railway.app"

@@ -435,7 +435,7 @@ async def admin_products(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     keyboard = [
         [_styled_btn("➕ Add Product", "admin_add_product", "admin_dashboard")],
         [_styled_btn("✏️ Edit Product", "admin_edit_product", "admin_products")],
-        [_styled_btn("🔌 ProdSeller Products", "admin_prodseller_products", "admin_products")],
+        [_styled_btn("🔌 Available Products", "admin_prodseller_products", "admin_products")],
         [_styled_btn("🗑 Delete Product", "admin_del_product", "admin_close")],
         [_styled_btn("🔙 Back", "admin_panel", "admin_close")],
     ]
@@ -446,12 +446,12 @@ async def admin_products(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def admin_prodseller_products(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """List live ProdSeller products with local selling-price/emoji overrides."""
+    """List live partner products with local selling-price/emoji overrides."""
     query = update.callback_query
     await query.answer()
     if not prodseller_configured():
         await query.edit_message_text(
-            "🔌 <b>ProdSeller</b>\n\nAPI is not configured.",
+            "🔌 <b>Available Products</b>\n\nProduct service is not configured.",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="admin_products")]]),
         )
@@ -467,7 +467,7 @@ async def admin_prodseller_products(update: Update, context: ContextTypes.DEFAUL
             conn.close()
     except ProdSellerError as exc:
         await query.edit_message_text(
-            f"❌ Could not load ProdSeller products:\n\n{escape(exc.message)}",
+            f"❌ Could not load available products:\n\n{escape(exc.message)}",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="admin_products")]]),
         )
@@ -484,7 +484,7 @@ async def admin_prodseller_products(update: Update, context: ContextTypes.DEFAUL
     )
 
     if not products:
-        text = "🔌 <b>Reseller Products</b>\n" + account_line + "\nNo active supplier products found."
+        text = "🔌 <b>Available Products</b>\n" + account_line + "\nNo active products found."
         buttons = []
     else:
         lines = []
@@ -503,7 +503,7 @@ async def admin_prodseller_products(update: Update, context: ContextTypes.DEFAUL
                 f"{emoji_for_button(product.get('emoji', '📦'))} {str(product.get('name') or 'Product')[:35]}",
                 callback_data=f"admin_ps_edit_{product_id}",
             )])
-        text = "🔌 <b>Reseller Products</b>\n" + account_line + "\n" + "\n".join(lines)
+        text = "🔌 <b>Available Products</b>\n" + account_line + "\n" + "\n".join(lines)
 
     buttons.append([InlineKeyboardButton("🔙 Back", callback_data="admin_products")])
     await query.edit_message_text(
@@ -514,7 +514,7 @@ async def admin_prodseller_products(update: Update, context: ContextTypes.DEFAUL
 
 
 async def admin_prodseller_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show price and emoji controls for one supplier product."""
+    """Show price and emoji controls for one available product."""
     query = update.callback_query
     await query.answer()
     data = query.data or ""
@@ -604,7 +604,7 @@ async def admin_prodseller_set_emoji(update: Update, context: ContextTypes.DEFAU
 
 
 async def admin_prodseller_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Ask for confirmation before clearing a supplier override."""
+    """Ask for confirmation before clearing a product override."""
     query = update.callback_query
     await query.answer()
     data = query.data or ""
@@ -625,7 +625,7 @@ async def admin_prodseller_reset(update: Update, context: ContextTypes.DEFAULT_T
 
 
 async def admin_prodseller_reset_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Apply a confirmed supplier override reset."""
+    """Apply a confirmed product override reset."""
     query = update.callback_query
     await query.answer()
     data = query.data or ""
@@ -3799,7 +3799,7 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if not state:
         return  # Not in admin mode
 
-    # --- ProdSeller selling price ---
+    # --- Partner product selling price ---
     if state == "ps_price":
         product_id = str(data.get("ps_product_id") or "")
         try:
@@ -3823,11 +3823,11 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await update.message.reply_html(
             f"✅ Selling price saved: <b>${price:.2f}</b>",
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔌 Back to ProdSeller Product", callback_data=f"admin_ps_edit_{product_id}")
+                InlineKeyboardButton("🔌 Back to Available Product", callback_data=f"admin_ps_edit_{product_id}")
             ]]),
         )
 
-    # --- ProdSeller product emoji ---
+    # --- Partner product emoji ---
     elif state == "ps_emoji":
         product_id = str(data.get("ps_product_id") or "")
         emoji = _extract_emoji(update.message)
@@ -3841,7 +3841,7 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await update.message.reply_html(
             f"✅ Product emoji saved: {emoji_for_html(emoji)}",
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔌 Back to ProdSeller Product", callback_data=f"admin_ps_edit_{product_id}")
+                InlineKeyboardButton("🔌 Back to Available Product", callback_data=f"admin_ps_edit_{product_id}")
             ]]),
         )
 
