@@ -520,6 +520,10 @@ async def admin_prodseller_edit(update: Update, context: ContextTypes.DEFAULT_TY
     data = query.data or ""
     if data.startswith("admin_ps_edit_"):
         product_id = data[len("admin_ps_edit_"):]
+    elif data.startswith("admin_ps_reset_price_confirm_"):
+        product_id = data[len("admin_ps_reset_price_confirm_"):]
+    elif data.startswith("admin_ps_reset_emoji_confirm_"):
+        product_id = data[len("admin_ps_reset_emoji_confirm_"):]
     elif data.startswith("admin_ps_reset_price_"):
         product_id = data[len("admin_ps_reset_price_"):]
     else:
@@ -600,11 +604,44 @@ async def admin_prodseller_set_emoji(update: Update, context: ContextTypes.DEFAU
 
 
 async def admin_prodseller_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Ask for confirmation before clearing a supplier override."""
     query = update.callback_query
     await query.answer()
     data = query.data or ""
     field = "price" if data.startswith("admin_ps_reset_price_") else "emoji"
-    product_id = data.replace(f"admin_ps_reset_{field}_", "", 1)
+    prefix = f"admin_ps_reset_{field}_"
+    product_id = data[len(prefix):]
+    label = "selling price" if field == "price" else "product emoji"
+    await query.edit_message_text(
+        f"⚠️ <b>Reset {label}?</b>\n\n"
+        "This removes the local override and restores the reseller default.\n"
+        "This action cannot be undone automatically.",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Confirm Reset", callback_data=f"admin_ps_reset_{field}_confirm_{product_id}")],
+            [InlineKeyboardButton("❌ Cancel", callback_data=f"admin_ps_edit_{product_id}")],
+        ]),
+    )
+
+
+async def admin_prodseller_reset_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Apply a confirmed supplier override reset."""
+    query = update.callback_query
+    await query.answer()
+    data = query.data or ""
+    if data.startswith("admin_ps_reset_price_confirm_"):
+        field = "price"
+        product_id = data[len("admin_ps_reset_price_confirm_"):]
+    elif data.startswith("admin_ps_reset_emoji_confirm_"):
+        field = "emoji"
+        product_id = data[len("admin_ps_reset_emoji_confirm_"):]
+    else:
+        await query.edit_message_text(
+            "❌ Invalid reset request.",
+            reply_markup=_back_button("admin_prodseller_products"),
+        )
+        return
+
     conn = get_db()
     try:
         save_product_override(conn, product_id, **{field: None})

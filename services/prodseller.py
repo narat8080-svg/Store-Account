@@ -251,7 +251,15 @@ async def list_products() -> list[dict]:
     products = data.get("products", [])
     if not isinstance(products, list):
         raise ProdSellerError("ProdSeller returned an invalid product list.", status=502)
-    _catalog_cache = [_normalise_product(p) for p in products if isinstance(p, dict)]
+    # The reseller catalog includes a synthetic API test product. It must
+    # never be exposed to Telegram customers or admin selling controls.
+    _catalog_cache = [
+        _normalise_product(p)
+        for p in products
+        if isinstance(p, dict)
+        and not p.get("api_test", False)
+        and str(p.get("name") or "").strip().lower() != "ventebot api test product"
+    ]
     return [dict(p) for p in _catalog_cache]
 
 

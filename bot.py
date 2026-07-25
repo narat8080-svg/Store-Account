@@ -81,6 +81,7 @@ from admin import (
     admin_prodseller_set_price,
     admin_prodseller_set_emoji,
     admin_prodseller_reset,
+    admin_prodseller_reset_confirm,
     admin_add_product_start,
     admin_prod_cat_selected,
     admin_del_product_start,
@@ -1348,7 +1349,7 @@ async def _handle_prodseller_qty(update: Update, context: ContextTypes.DEFAULT_T
         )
         return
     total = unit_price * quantity
-    context.user_data["buy_state"] = "prodseller_confirm"
+    context.user_data["buy_state"] = "prodseller_review"
     context.user_data["buy_data"] = {
         "product_id": str(product_id),
         "quantity": quantity,
@@ -1358,16 +1359,90 @@ async def _handle_prodseller_qty(update: Update, context: ContextTypes.DEFAULT_T
     context.user_data["prodseller_idempotency_key"] = f"tg_{update.effective_user.id}_{uuid.uuid4().hex}"
 
     await update.message.reply_html(
-        f"🛒 <b>Confirm ProdSeller Order</b>\n\n"
+        f"✅ <b>Review ProdSeller Order</b>\n\n"
         f"Product: <b>{escape(str(product.get('name') or 'Product'))}</b>\n"
         f"Quantity: <b>{quantity}</b>\n"
         f"Unit price: <b>${unit_price:.2f}</b>\n"
         f"Total: <b>${total:.2f}</b>\n\n"
-        "Choose how the customer will pay:",
+        "Confirm this order to continue to payment.",
+        reply_markup=InlineKeyboardMarkup([
+            [_make_smart_button("✅ Confirm Order", f"ps_confirm_{product_id}_{quantity}", "confirm")],
+            [_make_smart_button("❌ Cancel", "menu_product", "cancel")],
+        ]),
+    )
+    return
+
+
+
+async def prodseller_payment_options(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show payment actions only after explicit order confirmation."""
+    query = update.callback_query
+    await query.answer()
+    try:
+        product_id, quantity = _parse_prodseller_order_cb(
+            query.data or "", "ps_confirm_"
+        )
+    except (ValueError, IndexError):
+        await query.edit_message_text(
+            "❌ Invalid supplier order.",
+            reply_markup=_back_button("menu_product"),
+        )
+        return
+
+    checkout = context.user_data.get("buy_data") or {}
+    if (
+        context.user_data.get("buy_state") != "prodseller_review"
+        or str(checkout.get("product_id")) != product_id
+        or int(checkout.get("quantity", 0)) != quantity
+    ):
+        await query.edit_message_text(
+            "❌ This supplier checkout has expired. Please open the shop again.",
+            reply_markup=_back_button("menu_product"),
+        )
+        return
+
+    try:
+        product = await get_prodseller_product(product_id)
+        product = _prodseller_sale_product(product)
+        stock_label, stock_limit = _prodseller_stock_label(product)
+        if stock_limit == 0 or (stock_limit is not None and quantity > stock_limit):
+            raise ProdSellerError(f"Only {stock_label} available.", status=409)
+        unit_price = float(product.get("price", 0))
+        if unit_price <= 0:
+            raise ProdSellerError("Supplier returned an invalid product price.", status=502)
+        _, supplier_price, price_safe = _prodseller_price_guard(product)
+        if not price_safe:
+            raise ProdSellerError(
+                f"Selling price is below the supplier cost (${supplier_price:.2f}). "
+                "Please contact the administrator.",
+                status=409,
+            )
+    except (ProdSellerError, ValueError, TypeError) as exc:
+        message = _prodseller_error_text(exc) if isinstance(exc, ProdSellerError) else "Invalid supplier price."
+        await query.edit_message_text(
+            f"❌ {escape(message)}",
+            parse_mode="HTML",
+            reply_markup=_back_button("menu_product"),
+        )
+        return
+
+    total = round(unit_price * quantity, 2)
+    context.user_data["buy_state"] = "prodseller_confirm"
+    context.user_data["buy_data"].update({
+        "unit_price": unit_price,
+        "name": str(product.get("name") or "Product"),
+    })
+    await query.edit_message_text(
+        f"✅ <b>Order Confirmed</b>\n\n"
+        f"Product: <b>{escape(str(product.get('name') or 'Product'))}</b>\n"
+        f"Quantity: <b>{quantity}</b>\n"
+        f"Total: <b>${total:.2f}</b>\n\n"
+        "Choose a payment method:",
+        parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([
             [_make_smart_button(f"Pay with Wallet — ${total:.2f}", f"ps_wallet_{product_id}_{quantity}", "pay_wallet")],
             [_make_smart_button(f"Pay with KHQR — ${total:.2f}", f"ps_khqr_{product_id}_{quantity}", "pay_khqr")],
-            [_make_smart_button("Cancel", "menu_product", "cancel")],
+            [_make_smart_button("❌ Cancel", "menu_product", "cancel")],
         ]),
     )
 
@@ -1377,7 +1452,7 @@ async def prodseller_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     query = update.callback_query
     await query.answer()
     data = query.data or ""
-    prefix = "ps_wallet_" if data.startswith("ps_wallet_") else "ps_confirm_"
+    prefix = "ps_wallet_"
     raw = data[len(prefix):]
     try:
         product_id, quantity_text = raw.rsplit("_", 1)
@@ -3225,7 +3300,9 @@ async def _route_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, da
         await prodseller_buy_detail(update, context)
     elif data.startswith("ps_khqr_"):
         await prodseller_khqr_start(update, context)
-    elif data.startswith("ps_wallet_") or data.startswith("ps_confirm_"):
+    elif data.startswith("ps_confirm_"):
+        await prodseller_payment_options(update, context)
+    elif data.startswith("ps_wallet_"):
         await prodseller_order(update, context)
     elif data.startswith("buy_detail_"):
         await buy_detail(update, context)
@@ -3285,6 +3362,8 @@ async def _route_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, da
         await admin_prodseller_set_price(update, context)
     elif data.startswith("admin_ps_emoji_"):
         await admin_prodseller_set_emoji(update, context)
+    elif data.startswith("admin_ps_reset_price_confirm_") or data.startswith("admin_ps_reset_emoji_confirm_"):
+        await admin_prodseller_reset_confirm(update, context)
     elif data.startswith("admin_ps_reset_price_") or data.startswith("admin_ps_reset_emoji_"):
         await admin_prodseller_reset(update, context)
     elif data == "admin_add_product":

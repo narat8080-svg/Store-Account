@@ -2,7 +2,7 @@
 KHQRPay Payment Gateway — ABA Pay / KHQRcc (khqr.cc)
 
 Direct QR API (server-to-server) + Verify V2 with Bakong fallback.
-- create_aba_qr() → POST to qr-api-khqrcc → returns QR image URL + md5
+- create_aba_qr() → POST to payments/qr-api-khqr → returns QR image URL + md5
 - verify_aba_payment() → POST to check-transv2-khqrcc → returns paid status
 """
 import asyncio
@@ -62,7 +62,9 @@ async def create_aba_qr(
         "hash": hash_val,
     }
 
-    url = _api_url(profile_id, "qr-api-khqrcc")
+    # The current KHQRPay API documents `qr-api-khqr` for QR creation.
+    # `qr-api-khqrcc` was a legacy path and returns HTTP 404 HTML.
+    url = _api_url(profile_id, "qr-api-khqr")
     logger.info(f"KHQRPay QR API → {url} | txn={transaction_id} | amt={amount_str}")
 
     try:
@@ -74,6 +76,14 @@ async def create_aba_qr(
                 try:
                     data = json.loads(raw)
                 except Exception:
+                    if resp.status == 404:
+                        return {
+                            "success": False,
+                            "error": (
+                                "KHQR profile or endpoint not found (HTTP 404). "
+                                "Check KHQRPAY_PROFILE_ID and KHQRPAY_BASE_URL."
+                            ),
+                        }
                     return {"success": False, "error": f"Invalid JSON response (HTTP {resp.status})"}
 
                 if _is_success_code(data.get("responseCode")) and data.get("data"):
