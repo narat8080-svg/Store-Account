@@ -32,7 +32,14 @@ def _is_success_code(value) -> bool:
 
 
 def _api_url(profile_id: str, endpoint: str) -> str:
-    return f"{KHQRPAY_BASE}/{profile_id}/payment-gateway/v1/payments/{endpoint}"
+    base = KHQRPAY_BASE.rstrip("/")
+    # Public KHQRPay examples use https://khqr.cc as the base. Accept a
+    # mistakenly configured trailing /api so Railway does not build an
+    # invalid https://khqr.cc/api/{profile}/... URL.
+    if base.lower().endswith("/api"):
+        base = base[:-4].rstrip("/")
+    profile = str(profile_id or "").strip().strip("/")
+    return f"{base}/{profile}/payment-gateway/v1/payments/{endpoint}"
 
 
 async def create_aba_qr(
@@ -62,9 +69,10 @@ async def create_aba_qr(
         "hash": hash_val,
     }
 
-    # The current KHQRPay API documents `qr-api-khqr` for QR creation.
-    # `qr-api-khqrcc` was a legacy path and returns HTTP 404 HTML.
-    url = _api_url(profile_id, "qr-api-khqr")
+    # KHQRPay's current homepage uses `purchase` for QR creation. The
+    # dedicated API page documents `qr-api-khqr`; use the current homepage
+    # endpoint here because it is the live route for newer merchant profiles.
+    url = _api_url(profile_id, "purchase")
     logger.info(f"KHQRPay QR API → {url} | txn={transaction_id} | amt={amount_str}")
 
     try:
