@@ -239,8 +239,13 @@ async def get_wallet_balance() -> float:
         raise ProdSellerError("Reseller API returned an invalid wallet balance.", status=502)
 
 
-async def list_products() -> list[dict]:
+async def list_products(*, force_refresh: bool = False) -> list[dict]:
     global _catalog_cache, _catalog_etag
+    if force_refresh:
+        # A user-facing refresh must not reuse a previously cached catalog or
+        # conditional request state.  The next response becomes the new cache.
+        _catalog_cache = None
+        _catalog_etag = None
     headers = {"If-None-Match": _catalog_etag} if _catalog_etag else None
     try:
         data = await _request("GET", "/products", query={"lang": "en"}, extra_headers=headers)

@@ -1089,7 +1089,12 @@ async def _khqrpay_watcher(
 # ===========================================================================
 # PRODUCT BROWSING (User-facing)
 # ===========================================================================
-async def product_categories(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def product_categories(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    force_refresh: bool = False,
+) -> None:
     """
     Show the local catalog and, when configured, the live ProdSeller catalog.
     ProdSeller products use a separate callback prefix and purchase flow because
@@ -1110,7 +1115,7 @@ async def product_categories(update: Update, context: ContextTypes.DEFAULT_TYPE)
     supplier_error = None
     if prodseller_configured():
         try:
-            supplier_products = await list_prodseller_products()
+            supplier_products = await list_prodseller_products(force_refresh=force_refresh)
             conn = get_db()
             try:
                 supplier_overrides = get_product_overrides(conn)
@@ -1192,6 +1197,7 @@ async def product_categories(update: Update, context: ContextTypes.DEFAULT_TYPE)
         style = _get_button_style("buy", 999 if is_unlimited else stock)
         buttons.append([_safe_button(label, f"buy_detail_{p['id']}", icon_id, style)])
 
+    buttons.append([_make_smart_button("🔄 Refresh Products", "product_refresh", "refresh")])
     buttons.append([_make_smart_button("Back", "menu_start", "back")])
 
     if supplier_error:
@@ -1306,7 +1312,7 @@ async def prodseller_buy_detail(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def _handle_prodseller_qty(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Validate quantity and show a wallet confirmation screen."""
+    """Validate quantity and show the supplier payment choices."""
     if not update.message:
         return
     try:
@@ -1364,9 +1370,10 @@ async def _handle_prodseller_qty(update: Update, context: ContextTypes.DEFAULT_T
         f"Quantity: <b>{quantity}</b>\n"
         f"Unit price: <b>${unit_price:.2f}</b>\n"
         f"Total: <b>${total:.2f}</b>\n\n"
-        "Confirm this order to continue to payment.",
+        "Choose a payment method to continue.",
         reply_markup=InlineKeyboardMarkup([
-            [_make_smart_button("✅ Confirm Order", f"ps_confirm_{product_id}_{quantity}", "confirm")],
+            [_make_smart_button(f"Pay with Wallet — ${total:.2f}", f"ps_wallet_{product_id}_{quantity}", "pay_wallet")],
+            [_make_smart_button(f"Pay with KHQR — ${total:.2f}", f"ps_khqr_{product_id}_{quantity}", "pay_khqr")],
             [_make_smart_button("❌ Cancel", "menu_product", "cancel")],
         ]),
     )
@@ -1374,13 +1381,13 @@ async def _handle_prodseller_qty(update: Update, context: ContextTypes.DEFAULT_T
 
 
 
-async def prodseller_payment_options(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show payment actions only after explicit order confirmation."""
+async def prodseller_wallet_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show the final wallet order confirmation after Wallet is selected."""
     query = update.callback_query
     await query.answer()
     try:
         product_id, quantity = _parse_prodseller_order_cb(
-            query.data or "", "ps_confirm_"
+            query.data or "", "ps_wallet_"
         )
     except (ValueError, IndexError):
         await query.edit_message_text(
@@ -1427,21 +1434,20 @@ async def prodseller_payment_options(update: Update, context: ContextTypes.DEFAU
         return
 
     total = round(unit_price * quantity, 2)
-    context.user_data["buy_state"] = "prodseller_confirm"
+    context.user_data["buy_state"] = "prodseller_wallet_confirm"
     context.user_data["buy_data"].update({
         "unit_price": unit_price,
         "name": str(product.get("name") or "Product"),
     })
     await query.edit_message_text(
-        f"✅ <b>Order Confirmed</b>\n\n"
+        f"⚠️ <b>Confirm Wallet Order</b>\n\n"
         f"Product: <b>{escape(str(product.get('name') or 'Product'))}</b>\n"
         f"Quantity: <b>{quantity}</b>\n"
         f"Total: <b>${total:.2f}</b>\n\n"
-        "Choose a payment method:",
+        "Your bot Wallet will be charged after you confirm.",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([
-            [_make_smart_button(f"Pay with Wallet — ${total:.2f}", f"ps_wallet_{product_id}_{quantity}", "pay_wallet")],
-            [_make_smart_button(f"Pay with KHQR — ${total:.2f}", f"ps_khqr_{product_id}_{quantity}", "pay_khqr")],
+            [_make_smart_button("✅ Confirm Order", f"ps_wallet_confirm_{product_id}_{quantity}", "confirm")],
             [_make_smart_button("❌ Cancel", "menu_product", "cancel")],
         ]),
     )
@@ -1452,7 +1458,7 @@ async def prodseller_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     query = update.callback_query
     await query.answer()
     data = query.data or ""
-    prefix = "ps_wallet_"
+    prefix = "ps_wallet_confirm_"
     raw = data[len(prefix):]
     try:
         product_id, quantity_text = raw.rsplit("_", 1)
@@ -1465,7 +1471,7 @@ async def prodseller_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     checkout = context.user_data.get("buy_data") or {}
     if (
-        context.user_data.get("buy_state") != "prodseller_confirm"
+        context.user_data.get("buy_state") != "prodseller_wallet_confirm"
         or str(checkout.get("product_id")) != product_id
         or int(checkout.get("quantity", 0)) != quantity
     ):
@@ -1483,7 +1489,7 @@ async def prodseller_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         # the same wallet checkout cannot be charged twice.
         current_checkout = context.user_data.get("buy_data") or {}
         if (
-            context.user_data.get("buy_state") != "prodseller_confirm"
+            context.user_data.get("buy_state") != "prodseller_wallet_confirm"
             or str(current_checkout.get("product_id")) != product_id
             or int(current_checkout.get("quantity", 0)) != quantity
         ):
@@ -1673,7 +1679,7 @@ async def prodseller_khqr_start(update: Update, context: ContextTypes.DEFAULT_TY
 
     checkout = context.user_data.get("buy_data") or {}
     if (
-        context.user_data.get("buy_state") != "prodseller_confirm"
+        context.user_data.get("buy_state") != "prodseller_review"
         or str(checkout.get("product_id")) != product_id
         or int(checkout.get("quantity", 0)) != quantity
     ):
@@ -1703,7 +1709,7 @@ async def prodseller_khqr_start(update: Update, context: ContextTypes.DEFAULT_TY
                 status=409,
             )
     except (ProdSellerError, ValueError, TypeError) as exc:
-        context.user_data["buy_state"] = "prodseller_confirm"
+        context.user_data["buy_state"] = "prodseller_review"
         message = _prodseller_error_text(exc) if isinstance(exc, ProdSellerError) else "Invalid supplier price."
         await query.edit_message_text(f"❌ {escape(message)}", parse_mode="HTML", reply_markup=_back_button("menu_product"))
         return
@@ -1714,7 +1720,7 @@ async def prodseller_khqr_start(update: Update, context: ContextTypes.DEFAULT_TY
     finally:
         conn.close()
     if not cfg["profile_id"] or not cfg["secret_key"]:
-        context.user_data["buy_state"] = "prodseller_confirm"
+        context.user_data["buy_state"] = "prodseller_review"
         await query.edit_message_text(
             "❌ KHQR payment is not configured. Please contact the administrator.",
             reply_markup=_back_button("menu_product"),
@@ -1733,7 +1739,7 @@ async def prodseller_khqr_start(update: Update, context: ContextTypes.DEFAULT_TY
         remark=f"ProdSeller: {product.get('name', 'Product')} x{quantity}",
     )
     if not result.get("success"):
-        context.user_data["buy_state"] = "prodseller_confirm"
+        context.user_data["buy_state"] = "prodseller_review"
         await query.edit_message_text(
             f"❌ <b>KHQR generation failed</b>\n\n{escape(str(result.get('error') or 'Unknown gateway error'))}",
             parse_mode="HTML",
@@ -1745,7 +1751,7 @@ async def prodseller_khqr_start(update: Update, context: ContextTypes.DEFAULT_TY
     try:
         payment_id = create_payment(conn, update.effective_user.id, amount, result.get("qr_text", ""), transaction_id)
     except Exception:
-        context.user_data["buy_state"] = "prodseller_confirm"
+        context.user_data["buy_state"] = "prodseller_review"
         logger.exception("Could not persist ProdSeller KHQR payment before sending QR")
         await query.edit_message_text(
             "❌ Could not create a secure payment record. No QR was sent; please try again.",
@@ -1770,7 +1776,7 @@ async def prodseller_khqr_start(update: Update, context: ContextTypes.DEFAULT_TY
             parse_mode="HTML",
         )
     except Exception:
-        context.user_data["buy_state"] = "prodseller_confirm"
+        context.user_data["buy_state"] = "prodseller_review"
         logger.exception("Could not send ProdSeller KHQR image for payment %s", payment_id)
         await query.edit_message_text(
             "❌ Could not send the QR code. The payment was not shown; please try again.",
@@ -3292,6 +3298,8 @@ async def _route_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, da
     # --- Product Browsing ---
     elif data == "menu_product":
         await product_categories(update, context)
+    elif data == "product_refresh":
+        await product_categories(update, context, force_refresh=True)
     elif data.startswith("prod_cat_"):
         await product_categories(update, context)
 
@@ -3300,10 +3308,10 @@ async def _route_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, da
         await prodseller_buy_detail(update, context)
     elif data.startswith("ps_khqr_"):
         await prodseller_khqr_start(update, context)
-    elif data.startswith("ps_confirm_"):
-        await prodseller_payment_options(update, context)
-    elif data.startswith("ps_wallet_"):
+    elif data.startswith("ps_wallet_confirm_"):
         await prodseller_order(update, context)
+    elif data.startswith("ps_wallet_"):
+        await prodseller_wallet_confirm(update, context)
     elif data.startswith("buy_detail_"):
         await buy_detail(update, context)
     elif data.startswith("pay_wallet_") or data.startswith("pay_khqr_"):
