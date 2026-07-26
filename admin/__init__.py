@@ -496,12 +496,13 @@ async def admin_prodseller_products(update: Update, context: ContextTypes.DEFAUL
             product = apply_product_override(raw_product, overrides)
             stock = "Out of Stock" if raw_product.get("inStock") is False else "In Stock"
             lines.append(
-                f"{emoji_for_html(product.get('emoji', '📦'))} <b>{escape(str(product.get('name') or 'Product'))}</b>\n"
+                f"<b>{escape(str(product.get('name') or 'Product'))}</b>\n"
                 f"   Cost: ${float(product.get('supplier_price', 0)):.2f} | Sell: ${float(product.get('price', 0)):.2f} | {stock}"
             )
-            buttons.append([InlineKeyboardButton(
-                f"{emoji_for_button(product.get('emoji', '📦'))} {str(product.get('name') or 'Product')[:35]}",
-                callback_data=f"admin_ps_edit_{product_id}",
+            buttons.append([_cat_btn(
+                str(product.get("name") or "Product")[:35],
+                f"admin_ps_edit_{product_id}",
+                product.get("emoji", "📦"),
             )])
         text = "🔌 <b>Available Products</b>\n" + account_line + "\n" + "\n".join(lines)
 
@@ -547,14 +548,27 @@ async def admin_prodseller_edit(update: Update, context: ContextTypes.DEFAULT_TY
         )
         return
 
+    api_product = dict(product)
     product = apply_product_override(product, overrides)
     name = escape(str(product.get("name") or "Product"))
     emoji = product.get("emoji", "📦")
     price_override = (overrides.get(str(product_id)) or {}).get("price")
     emoji_override = (overrides.get(str(product_id)) or {}).get("emoji")
     desc_override = (overrides.get(str(product_id)) or {}).get("description")
+    api_description = str(api_product.get("description") or "").strip()
     description = str(product.get("description") or "").strip()
-    desc_preview = escape(description[:150] + ("…" if len(description) > 150 else "")) if description else "<i>none</i>"
+
+    def _description_preview(value: str) -> str:
+        if not value:
+            return "<i>none</i>"
+        rich = unpack_rich_message(value)
+        plain = (rich.get("text") or _strip_html(rich.get("html") or "")).strip()
+        if len(plain) > 150:
+            plain = plain[:150] + "…"
+        return escape(plain)
+
+    api_desc_preview = _description_preview(api_description)
+    desc_preview = _description_preview(description)
 
     def _detail_text(emoji_html: str) -> str:
         return (
@@ -563,7 +577,8 @@ async def admin_prodseller_edit(update: Update, context: ContextTypes.DEFAULT_TY
             f"Selling price: <b>${float(product.get('price', 0)):.2f}</b>\n"
             f"Profit per item: <b>${float(product.get('price', 0)) - float(product.get('supplier_price', 0)):.2f}</b>\n"
             f"Emoji: {emoji_html}\n"
-            f"Description: {desc_preview}\n"
+            f"API description: {api_desc_preview}\n"
+            f"Current description: {desc_preview}\n"
             f"Price override: {'Yes' if price_override is not None else 'No'}\n"
             f"Emoji override: {'Yes' if emoji_override else 'No'}\n"
             f"Description override: {'Yes' if desc_override else 'No'}"
@@ -3915,7 +3930,10 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     # --- Partner product description ---
     elif state == "ps_desc":
         product_id = str(data.get("ps_product_id") or "")
-        raw_desc = (update.message.text or "").strip()
+        raw_desc = (
+            (update.message.text if update.message.text is not None else update.message.caption)
+            or ""
+        ).strip()
         if not raw_desc:
             await update.message.reply_html(
                 "❌ Description cannot be empty. Send the new description, or <code>-</code> to remove it:",
@@ -3923,9 +3941,16 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             )
             return
         cleared = raw_desc == "-"
+        rich_desc = "" if cleared else capture_rich_description(update.message)
+        if not cleared and not rich_desc:
+            await update.message.reply_html(
+                "Description cannot be empty. Send text or premium emoji with text:",
+                reply_markup=_cancel_button(f"admin_ps_edit_{product_id}"),
+            )
+            return
         conn = get_db()
         try:
-            save_product_override(conn, product_id, description=None if cleared else raw_desc)
+            save_product_override(conn, product_id, description=None if cleared else rich_desc)
         finally:
             conn.close()
         context.user_data.pop("admin_state", None)
@@ -3933,14 +3958,21 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         if cleared:
             note = "✅ Custom description removed — supplier default restored."
         else:
-            preview = escape(raw_desc[:200] + ("…" if len(raw_desc) > 200 else ""))
-            note = f"✅ Description saved:\n\n<i>{preview}</i>"
-        await update.message.reply_html(
-            note,
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔌 Back to Available Product", callback_data=f"admin_ps_edit_{product_id}")
-            ]]),
-        )
+            note = "✅ Description saved."
+        back_markup = InlineKeyboardMarkup([[
+            InlineKeyboardButton("🔌 Back to Available Product", callback_data=f"admin_ps_edit_{product_id}")
+        ]])
+        await update.message.reply_html(note, reply_markup=back_markup)
+        if not cleared:
+            try:
+                await send_rich_message(
+                    context.bot,
+                    update.effective_chat.id,
+                    unpack_rich_message(rich_desc),
+                    reply_to_message=update.message,
+                )
+            except Exception as exc:
+                logger.warning("Could not preview supplier description: %s", exc)
 
     # --- Category Name ---
     elif state == "cat_name":

@@ -35,8 +35,10 @@ def _api_url(profile_id: str, endpoint: str) -> str:
     # Public KHQRPay examples use https://khqr.cc as the base. Accept a
     # mistakenly configured trailing /api so Railway does not build an
     # invalid https://khqr.cc/api/{profile}/... URL.
-    if base.lower().endswith("/api"):
-        base = base[:-4].rstrip("/")
+    for suffix in ("/api/payment-gateway/v1", "/payment-gateway/v1", "/api"):
+        if base.lower().endswith(suffix):
+            base = base[:-len(suffix)].rstrip("/")
+            break
     profile = str(profile_id or "").strip().strip("/")
     return f"{base}/{profile}/payment-gateway/v1/payments/{endpoint}"
 
@@ -87,8 +89,12 @@ async def create_aba_qr(
                         return {
                             "success": False,
                             "error": (
-                                "KHQR profile or endpoint not found (HTTP 404). "
-                                "Check KHQRPAY_PROFILE_ID and KHQRPAY_BASE_URL."
+                                "KHQRPay returned HTTP 404. The configured merchant "
+                                "profile was not found at the payment endpoint. "
+                                "Use the exact Profile ID from the KHQRPay dashboard "
+                                "and set KHQRPAY_BASE_URL to https://khqr.cc. "
+                                "An Admin > Payment Settings profile overrides the "
+                                "Railway KHQRPAY_PROFILE_ID variable."
                             ),
                         }
                     return {"success": False, "error": f"Invalid JSON response (HTTP {resp.status})"}

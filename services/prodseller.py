@@ -64,6 +64,13 @@ def _normalise_emoji(value):
 def _normalise_product(product: dict) -> dict:
     """Map the new catalog schema to the fields used by the bot UI."""
     result = dict(product or {})
+    if result.get("description") is None:
+        for key in ("description_en", "descriptionEn", "details", "desc"):
+            if result.get(key) is not None:
+                result["description"] = result[key]
+                break
+    result["description"] = str(result.get("description") or "")
+    result["supplier_description"] = result["description"]
     try:
         cost = float(result.get("price_usd", result.get("price", 0)))
     except (TypeError, ValueError):
@@ -168,7 +175,7 @@ def apply_product_override(product: dict, overrides: dict | None = None) -> dict
         result["supplier_price"] = result.get("price", 0)
     if override.get("emoji"):
         result["emoji"] = override["emoji"]
-    if override.get("description"):
+    if "description" in override:
         result["description"] = override["description"]
     return result
 

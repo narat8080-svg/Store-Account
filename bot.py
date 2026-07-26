@@ -1342,6 +1342,16 @@ def _prodseller_error_text(exc: ProdSellerError) -> str:
     return exc.message
 
 
+def _prodseller_description_html(value) -> str:
+    """Render rich admin descriptions while escaping plain API text."""
+    raw = str(value or "")
+    if not raw:
+        return ""
+    if raw.lstrip().startswith("{") and '"v"' in raw[:40]:
+        return description_to_html(raw)
+    return escape(raw)
+
+
 async def prodseller_buy_detail(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show a live partner product and ask for quantity."""
     query = update.callback_query
@@ -1383,8 +1393,8 @@ async def prodseller_buy_detail(update: Update, context: ContextTypes.DEFAULT_TY
         )
         return
     name = escape(str(product.get("name") or "Product"))
-    description = escape(str(product.get("description") or ""))
-    description_line = f"\n📝 {description}" if description else ""
+    description = _prodseller_description_html(product.get("description"))
+    description_line = f"\n{E('description')} {description}" if description else ""
     context.user_data["buy_state"] = "prodseller_qty"
     context.user_data["buy_data"] = {"product_id": product_id}
 
