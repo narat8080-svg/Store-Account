@@ -80,6 +80,7 @@ from admin import (
     admin_prodseller_edit,
     admin_prodseller_set_price,
     admin_prodseller_set_emoji,
+    admin_prodseller_set_desc,
     admin_prodseller_reset,
     admin_prodseller_reset_confirm,
     admin_add_product_start,
@@ -558,6 +559,40 @@ def _safe_button(text: str, callback_data: str,
         return InlineKeyboardButton(**kwargs)
     except TypeError:
         return InlineKeyboardButton(text=text, callback_data=callback_data)
+
+
+def _strip_button_icons(markup: InlineKeyboardMarkup, fallbacks: dict | None = None) -> InlineKeyboardMarkup:
+    """
+    Rebuild a keyboard without premium icon_custom_emoji_id.
+    Telegram only allows button icons on some bot accounts / message types —
+    when it rejects them, resend the same keyboard with plain emoji labels.
+    `fallbacks` maps callback_data → plain emoji to restore in the label.
+    """
+    rows = []
+    for row in markup.inline_keyboard:
+        new_row = []
+        for b in row:
+            if not getattr(b, "icon_custom_emoji_id", None):
+                new_row.append(b)
+                continue
+            text = b.text or ""
+            fb = (fallbacks or {}).get(b.callback_data or "")
+            if fb and not text.startswith(fb):
+                text = f"{fb} {text}".strip()
+            kwargs = {"text": text}
+            if b.callback_data is not None:
+                kwargs["callback_data"] = b.callback_data
+            if getattr(b, "url", None):
+                kwargs["url"] = b.url
+            if getattr(b, "style", None):
+                kwargs["style"] = b.style
+            try:
+                new_row.append(InlineKeyboardButton(**kwargs))
+            except TypeError:
+                kwargs.pop("style", None)
+                new_row.append(InlineKeyboardButton(**kwargs))
+        rows.append(new_row)
+    return InlineKeyboardMarkup(rows)
 
 
 def _make_url_button(text: str, url: str, key: str = None) -> InlineKeyboardButton:
@@ -1136,6 +1171,7 @@ async def product_categories(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     buttons = []
+    icon_fallbacks = {}  # callback_data → plain emoji, used if Telegram rejects premium icons
     text_sections = [f"{E('product')} <b>Products</b>"]
 
     if supplier_products:
@@ -1166,6 +1202,8 @@ async def product_categories(update: Update, context: ContextTypes.DEFAULT_TYPE)
             label = f"{name} — ${price:.2f}{stock_label}"
             if not premium_id:
                 label = f"{emoji_for_button(product_emoji)} {label}"
+            else:
+                icon_fallbacks[f"ps_product_{product_id}"] = emoji_for_button(product_emoji)
             style = _get_button_style("buy", stock_count)
             buttons.append([_safe_button(label, f"ps_product_{product_id}", str(premium_id) if premium_id else None, style)])
 
@@ -1187,6 +1225,7 @@ async def product_categories(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if pid:
             # Premium icon only — no old unicode beside it
             label = name_part
+            icon_fallbacks[f"buy_detail_{p['id']}"] = emoji_for_button(p['emoji'])
         else:
             label = f"{emoji_for_button(p['emoji'])} {name_part}"
         style = _get_button_style("buy", 999 if is_unlimited else stock)
@@ -1198,11 +1237,37 @@ async def product_categories(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if supplier_error:
         text_sections.append(f"\n<i>Product service is temporarily unavailable: {escape(supplier_error)}</i>")
 
-    await query.edit_message_text(
-        "\n".join(text_sections) + "\n\nTap a product to buy:\n<i>Stock is shown next to each product.</i>",
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(buttons),
-    )
+    final_text = "\n".join(text_sections) + "\n\nTap a product to buy:\n<i>Stock is shown next to each product.</i>"
+    markup = InlineKeyboardMarkup(buttons)
+    try:
+        await query.edit_message_text(final_text, parse_mode="HTML", reply_markup=markup)
+        return
+    except Exception as e:
+        if "not modified" in str(e).lower():
+            return
+        logger.warning(f"product_categories: edit with premium icons failed ({e}); resending")
+
+    # Telegram allows premium button icons only on freshly sent messages for
+    # some bot accounts — resend instead of editing, then degrade to plain emoji.
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+    try:
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=final_text,
+            parse_mode="HTML",
+            reply_markup=markup,
+        )
+    except Exception as e:
+        logger.warning(f"product_categories: fresh send with icons failed ({e}); stripping icons")
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=final_text,
+            parse_mode="HTML",
+            reply_markup=_strip_button_icons(markup, icon_fallbacks),
+        )
 
 
 
@@ -3365,9 +3430,19 @@ async def _route_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, da
         await admin_prodseller_set_price(update, context)
     elif data.startswith("admin_ps_emoji_"):
         await admin_prodseller_set_emoji(update, context)
-    elif data.startswith("admin_ps_reset_price_confirm_") or data.startswith("admin_ps_reset_emoji_confirm_"):
+    elif data.startswith("admin_ps_desc_"):
+        await admin_prodseller_set_desc(update, context)
+    elif (
+        data.startswith("admin_ps_reset_price_confirm_")
+        or data.startswith("admin_ps_reset_emoji_confirm_")
+        or data.startswith("admin_ps_reset_desc_confirm_")
+    ):
         await admin_prodseller_reset_confirm(update, context)
-    elif data.startswith("admin_ps_reset_price_") or data.startswith("admin_ps_reset_emoji_"):
+    elif (
+        data.startswith("admin_ps_reset_price_")
+        or data.startswith("admin_ps_reset_emoji_")
+        or data.startswith("admin_ps_reset_desc_")
+    ):
         await admin_prodseller_reset(update, context)
     elif data == "admin_add_product":
         await admin_add_product_start(update, context)

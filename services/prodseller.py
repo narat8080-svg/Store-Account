@@ -120,7 +120,7 @@ def get_product_overrides(conn) -> dict:
     return value if isinstance(value, dict) else {}
 
 
-def save_product_override(conn, product_id: str, *, price=_UNSET, emoji=_UNSET) -> dict:
+def save_product_override(conn, product_id: str, *, price=_UNSET, emoji=_UNSET, description=_UNSET) -> dict:
     """Update one supplier product override and persist the full override map."""
     from services.database import set_bot_setting
 
@@ -137,6 +137,11 @@ def save_product_override(conn, product_id: str, *, price=_UNSET, emoji=_UNSET) 
             entry.pop("emoji", None)
         else:
             entry["emoji"] = emoji
+    if description is not _UNSET:
+        if description is None:
+            entry.pop("description", None)
+        else:
+            entry["description"] = str(description)
     if entry:
         overrides[key] = entry
     else:
@@ -163,6 +168,8 @@ def apply_product_override(product: dict, overrides: dict | None = None) -> dict
         result["supplier_price"] = result.get("price", 0)
     if override.get("emoji"):
         result["emoji"] = override["emoji"]
+    if override.get("description"):
+        result["description"] = override["description"]
     return result
 
 

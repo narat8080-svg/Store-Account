@@ -524,8 +524,12 @@ async def admin_prodseller_edit(update: Update, context: ContextTypes.DEFAULT_TY
         product_id = data[len("admin_ps_reset_price_confirm_"):]
     elif data.startswith("admin_ps_reset_emoji_confirm_"):
         product_id = data[len("admin_ps_reset_emoji_confirm_"):]
+    elif data.startswith("admin_ps_reset_desc_confirm_"):
+        product_id = data[len("admin_ps_reset_desc_confirm_"):]
     elif data.startswith("admin_ps_reset_price_"):
         product_id = data[len("admin_ps_reset_price_"):]
+    elif data.startswith("admin_ps_reset_desc_"):
+        product_id = data[len("admin_ps_reset_desc_"):]
     else:
         product_id = data[len("admin_ps_reset_emoji_"):]
     try:
@@ -548,23 +552,40 @@ async def admin_prodseller_edit(update: Update, context: ContextTypes.DEFAULT_TY
     emoji = product.get("emoji", "📦")
     price_override = (overrides.get(str(product_id)) or {}).get("price")
     emoji_override = (overrides.get(str(product_id)) or {}).get("emoji")
-    text = (
-        f"🔌 <b>{name}</b>\n\n"
-        f"Supplier cost: <b>${float(product.get('supplier_price', 0)):.2f}</b>\n"
-        f"Selling price: <b>${float(product.get('price', 0)):.2f}</b>\n"
-        f"Profit per item: <b>${float(product.get('price', 0)) - float(product.get('supplier_price', 0)):.2f}</b>\n"
-        f"Emoji: {emoji_for_html(emoji)}\n"
-        f"Price override: {'Yes' if price_override is not None else 'No'}\n"
-        f"Emoji override: {'Yes' if emoji_override else 'No'}"
-    )
+    desc_override = (overrides.get(str(product_id)) or {}).get("description")
+    description = str(product.get("description") or "").strip()
+    desc_preview = escape(description[:150] + ("…" if len(description) > 150 else "")) if description else "<i>none</i>"
+
+    def _detail_text(emoji_html: str) -> str:
+        return (
+            f"🔌 <b>{name}</b>\n\n"
+            f"Supplier cost: <b>${float(product.get('supplier_price', 0)):.2f}</b>\n"
+            f"Selling price: <b>${float(product.get('price', 0)):.2f}</b>\n"
+            f"Profit per item: <b>${float(product.get('price', 0)) - float(product.get('supplier_price', 0)):.2f}</b>\n"
+            f"Emoji: {emoji_html}\n"
+            f"Description: {desc_preview}\n"
+            f"Price override: {'Yes' if price_override is not None else 'No'}\n"
+            f"Emoji override: {'Yes' if emoji_override else 'No'}\n"
+            f"Description override: {'Yes' if desc_override else 'No'}"
+        )
+
     keyboard = [
         [InlineKeyboardButton("💰 Set Selling Price", callback_data=f"admin_ps_price_{product_id}")],
         [InlineKeyboardButton("🎨 Set Premium Emoji", callback_data=f"admin_ps_emoji_{product_id}")],
+        [InlineKeyboardButton("📝 Edit Description", callback_data=f"admin_ps_desc_{product_id}")],
         [InlineKeyboardButton("↩️ Reset Price", callback_data=f"admin_ps_reset_price_{product_id}"),
          InlineKeyboardButton("↩️ Reset Emoji", callback_data=f"admin_ps_reset_emoji_{product_id}")],
+        [InlineKeyboardButton("↩️ Reset Description", callback_data=f"admin_ps_reset_desc_{product_id}")],
         [InlineKeyboardButton("🔙 Back", callback_data="admin_prodseller_products")],
     ]
-    await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+    markup = InlineKeyboardMarkup(keyboard)
+    try:
+        await query.edit_message_text(_detail_text(emoji_for_html(emoji)), parse_mode="HTML", reply_markup=markup)
+    except Exception as e:
+        if "not modified" in str(e).lower():
+            return
+        # Premium <tg-emoji> can be rejected by Telegram — retry with the plain fallback char.
+        await query.edit_message_text(_detail_text(escape(emoji_for_button(emoji))), parse_mode="HTML", reply_markup=markup)
 
 
 async def admin_prodseller_set_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -603,15 +624,38 @@ async def admin_prodseller_set_emoji(update: Update, context: ContextTypes.DEFAU
     )
 
 
+async def admin_prodseller_set_desc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Prompt for a custom description override for a partner product."""
+    query = update.callback_query
+    await query.answer()
+    product_id = (query.data or "").replace("admin_ps_desc_", "", 1)
+    context.user_data["admin_state"] = "ps_desc"
+    context.user_data["admin_data"] = {"ps_product_id": product_id}
+    await query.edit_message_text(
+        "📝 <b>Edit product description</b>\n\n"
+        "Send the new description shown to customers for this product.\n"
+        "Send <code>-</code> to remove the custom description and restore the supplier default.",
+        parse_mode="HTML",
+        reply_markup=_cancel_button(f"admin_ps_edit_{product_id}"),
+    )
+
+
 async def admin_prodseller_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Ask for confirmation before clearing a product override."""
     query = update.callback_query
     await query.answer()
     data = query.data or ""
-    field = "price" if data.startswith("admin_ps_reset_price_") else "emoji"
+    if data.startswith("admin_ps_reset_price_"):
+        field = "price"
+        label = "selling price"
+    elif data.startswith("admin_ps_reset_desc_"):
+        field = "desc"
+        label = "product description"
+    else:
+        field = "emoji"
+        label = "product emoji"
     prefix = f"admin_ps_reset_{field}_"
     product_id = data[len(prefix):]
-    label = "selling price" if field == "price" else "product emoji"
     await query.edit_message_text(
         f"⚠️ <b>Reset {label}?</b>\n\n"
         "This removes the local override and restores the reseller default.\n"
@@ -635,6 +679,9 @@ async def admin_prodseller_reset_confirm(update: Update, context: ContextTypes.D
     elif data.startswith("admin_ps_reset_emoji_confirm_"):
         field = "emoji"
         product_id = data[len("admin_ps_reset_emoji_confirm_"):]
+    elif data.startswith("admin_ps_reset_desc_confirm_"):
+        field = "description"
+        product_id = data[len("admin_ps_reset_desc_confirm_"):]
     else:
         await query.edit_message_text(
             "❌ Invalid reset request.",
@@ -3838,8 +3885,48 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             conn.close()
         context.user_data.pop("admin_state", None)
         context.user_data.pop("admin_data", None)
+        back_markup = InlineKeyboardMarkup([[
+            InlineKeyboardButton("🔌 Back to Available Product", callback_data=f"admin_ps_edit_{product_id}")
+        ]])
+        try:
+            await update.message.reply_html(
+                f"✅ Product emoji saved: {emoji_for_html(emoji)}",
+                reply_markup=back_markup,
+            )
+        except Exception:
+            # Telegram rejected the premium <tg-emoji> — the override is saved
+            # anyway, so confirm with the plain fallback character instead.
+            await update.message.reply_html(
+                f"✅ Product emoji saved: {escape(emoji_for_button(emoji))}\n"
+                "<i>Note: the premium icon shows on shop buttons; this chat preview uses the fallback emoji.</i>",
+                reply_markup=back_markup,
+            )
+
+    # --- Partner product description ---
+    elif state == "ps_desc":
+        product_id = str(data.get("ps_product_id") or "")
+        raw_desc = (update.message.text or "").strip()
+        if not raw_desc:
+            await update.message.reply_html(
+                "❌ Description cannot be empty. Send the new description, or <code>-</code> to remove it:",
+                reply_markup=_cancel_button(f"admin_ps_edit_{product_id}"),
+            )
+            return
+        cleared = raw_desc == "-"
+        conn = get_db()
+        try:
+            save_product_override(conn, product_id, description=None if cleared else raw_desc)
+        finally:
+            conn.close()
+        context.user_data.pop("admin_state", None)
+        context.user_data.pop("admin_data", None)
+        if cleared:
+            note = "✅ Custom description removed — supplier default restored."
+        else:
+            preview = escape(raw_desc[:200] + ("…" if len(raw_desc) > 200 else ""))
+            note = f"✅ Description saved:\n\n<i>{preview}</i>"
         await update.message.reply_html(
-            f"✅ Product emoji saved: {emoji_for_html(emoji)}",
+            note,
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("🔌 Back to Available Product", callback_data=f"admin_ps_edit_{product_id}")
             ]]),
