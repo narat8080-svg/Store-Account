@@ -3328,15 +3328,15 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         try:
             conn = get_db()
             try:
-            registered = _cached_get_user(conn, user.id, user.username, user.first_name)
-            if user.id != ADMIN_ID and registered.get("is_banned"):
-                try:
-                    await update.callback_query.answer(
-                        "Your account has been suspended.", show_alert=True
-                    )
-                except Exception:
-                    pass
-                return
+                registered = _cached_get_user(conn, user.id, user.username, user.first_name)
+                if user.id != ADMIN_ID and registered.get("is_banned"):
+                    try:
+                        await update.callback_query.answer(
+                            "Your account has been suspended.", show_alert=True
+                        )
+                    except Exception:
+                        pass
+                    return
             finally:
                 conn.close()
         except Exception as e:
