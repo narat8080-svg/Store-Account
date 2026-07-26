@@ -1860,6 +1860,11 @@ async def admin_ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         ban_user(conn, user_id)
     finally:
         conn.close()
+    try:
+        from bot import _user_cache
+        _user_cache.pop(user_id, None)
+    except Exception:
+        pass
     await admin_user_detail(update, context, user_id=user_id)
 
 
@@ -1872,6 +1877,11 @@ async def admin_unban_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         unban_user(conn, user_id)
     finally:
         conn.close()
+    try:
+        from bot import _user_cache
+        _user_cache.pop(user_id, None)
+    except Exception:
+        pass
     await admin_user_detail(update, context, user_id=user_id)
 
 

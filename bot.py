@@ -662,6 +662,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         if user:
             db_user = get_or_create_user(conn, user.id, user.username, user.first_name)
+            if user.id != ADMIN_ID and db_user.get("is_banned"):
+                if update.message:
+                    await update.message.reply_text(
+                        "Access denied. Your account has been suspended."
+                    )
+                elif update.callback_query:
+                    try:
+                        await update.callback_query.answer(
+                            "Your account has been suspended.", show_alert=True
+                        )
+                    except Exception:
+                        pass
+                return
             # Notify group on first interaction (once per user session)
             if context.user_data.get("new_user_notified") is None:
                 order_count = get_order_count(conn, user.id)
@@ -2319,8 +2332,6 @@ async def buy_execute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     promo_data = None; discount = 0; unit_price = price
                 elif price < promo_data["min_order"]:
                     promo_data = None; discount = 0; unit_price = price
-                else:
-                    use_promo_code(conn, promo_data["id"])
 
         db_user = get_or_create_user(conn, user.id, user.username, user.first_name)
         balance = db_user["balance"]
@@ -2385,6 +2396,9 @@ async def buy_execute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     )
                     created_order_ids.append(order_id)
                     link_stock_to_order(conn, item["id"], order_id)
+
+            if promo_data and not use_promo_code(conn, promo_data["id"]):
+                raise RuntimeError("Promo code is no longer available")
 
             new_balance = balance - total_price
         except Exception:
@@ -2733,8 +2747,8 @@ async def _khqrpay_order_watcher(
                             pass
                         return
 
-                if promo_data:
-                    use_promo_code(conn, promo_data["id"])
+                if promo_data and not use_promo_code(conn, promo_data["id"]):
+                    raise RuntimeError("Promo code is no longer available")
 
                 if is_unlimited:
                     for _ in range(qty):
@@ -3304,7 +3318,15 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         try:
             conn = get_db()
             try:
-                _cached_get_user(conn, user.id, user.username, user.first_name)
+            registered = _cached_get_user(conn, user.id, user.username, user.first_name)
+            if user.id != ADMIN_ID and registered.get("is_banned"):
+                try:
+                    await update.callback_query.answer(
+                        "Your account has been suspended.", show_alert=True
+                    )
+                except Exception:
+                    pass
+                return
             finally:
                 conn.close()
         except Exception as e:
@@ -3334,7 +3356,15 @@ async def _route_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, da
     user = update.effective_user
 
     # Backup / restore UI is admin-only — never expose status to other users
-    if data.startswith("admin_backup"):
+    is_admin_callback = (
+        data.startswith(("admin_", "report_", "btn_"))
+        or data in {"custom_set_emoji", "custom_reset_all", "custom_reset_all_confirm"}
+        or data.startswith((
+            "custom_sec_", "custom_emoji_", "custom_setval_",
+            "custom_update_", "custom_reset_",
+        ))
+    )
+    if is_admin_callback:
         if not user or int(user.id) != int(ADMIN_ID):
             try:
                 await query.answer("⛔ Access denied.", show_alert=True)
@@ -3672,18 +3702,23 @@ async def _route_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, da
 async def unified_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Route text messages: admin input vs user promo code input vs custom qty."""
     user = update.effective_user
+    registered = {}
     # Register every user who sends any message so admin's user list is complete.
     if user:
         try:
             conn = get_db()
             try:
-                get_or_create_user(conn, user.id, user.username, user.first_name)
+                registered = get_or_create_user(conn, user.id, user.username, user.first_name)
                 order_count = get_order_count(conn, user.id)
                 # New-user alert is handled once in /start to avoid spam on every message
             finally:
                 conn.close()
         except Exception as e:
             logger.warning(f"unified_text_handler(): could not register user {user.id}: {e}")
+
+    if user.id != ADMIN_ID and registered.get("is_banned"):
+        await update.message.reply_text("Access denied. Your account has been suspended.")
+        return
 
     if user.id == ADMIN_ID and context.user_data.get("admin_state"):
         await handle_admin_text(update, context)

@@ -61,10 +61,34 @@ def get_user_balance(conn, user_id):
 
 def add_balance(conn, user_id, amount):
     s = _get_supabase()
-    bal = get_user_balance(conn, user_id)
-    nb = bal + amount
-    s.table('users').update({'balance': nb}).eq('user_id', user_id).execute()
-    return nb
+    amount = float(amount)
+
+    # Compare-and-set prevents concurrent deposits, refunds, and purchases
+    # from overwriting each other's balance changes. The previous read-then-
+    # write implementation could silently lose money under concurrent_updates.
+    for _ in range(5):
+        r = s.table('users').select('balance').eq('user_id', user_id).execute()
+        if not r.data:
+            raise LookupError(f'User {user_id} does not exist')
+
+        current = float(r.data[0].get('balance') or 0.0)
+        if amount < 0 and current < -amount:
+            raise ValueError('Insufficient balance')
+
+        new_balance = current + amount
+        q = (
+            s.table('users')
+            .update({'balance': new_balance})
+            .eq('user_id', user_id)
+            .eq('balance', current)
+        )
+        if amount < 0:
+            q = q.gte('balance', -amount)
+        updated = q.select('balance').execute()
+        if updated.data:
+            return float(updated.data[0].get('balance') or 0.0)
+
+    raise RuntimeError('Balance changed concurrently; please retry the operation')
 
 def get_order_count(conn, user_id):
     s = _get_supabase()
@@ -464,9 +488,29 @@ def get_promo_code(conn, code):
 
 def use_promo_code(conn, code_id):
     s = _get_supabase()
-    r = s.table('promo_codes').select('current_uses').eq('id', code_id).execute()
-    if r.data:
-        s.table('promo_codes').update({'current_uses': r.data[0].get('current_uses',0)+1}).eq('id', code_id).execute()
+    r = s.table('promo_codes').select('current_uses,max_uses,is_active').eq('id', code_id).execute()
+    if not r.data or not r.data[0].get('is_active', 1):
+        return False
+
+    row = r.data[0]
+    current = int(row.get('current_uses') or 0)
+    maximum = int(row.get('max_uses') or 0)
+    if maximum > 0 and current >= maximum:
+        return False
+
+    # Include the previously-read count in the update predicate so two
+    # concurrent checkouts cannot both consume the same final use.
+    q = (
+        s.table('promo_codes')
+        .update({'current_uses': current + 1})
+        .eq('id', code_id)
+        .eq('is_active', 1)
+        .eq('current_uses', current)
+    )
+    if maximum > 0:
+        q = q.lt('current_uses', maximum)
+    result = q.select('id').execute()
+    return bool(result.data)
 
 def get_all_promo_codes(conn):
     return _rows(_get_supabase().table('promo_codes').select('*').eq('is_active', 1).order('id').execute().data)
@@ -551,10 +595,7 @@ def unban_user(conn, user_id):
     _get_supabase().table('users').update({'is_banned': 0}).eq('user_id', user_id).execute()
 
 def update_user_balance(conn, user_id, amount):
-    bal = get_user_balance(conn, user_id)
-    nb = bal + amount
-    _get_supabase().table('users').update({'balance': nb}).eq('user_id', user_id).execute()
-    return nb
+    return add_balance(conn, user_id, amount)
 
 # === REPORTS ===
 def get_sales_report(conn, period='daily'):
