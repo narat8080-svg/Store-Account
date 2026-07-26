@@ -94,8 +94,10 @@ def create_backup() -> dict:
                 rows = [r for r in rows if not _is_auto_backup_setting_key(r.get("key", ""))]
             backup_data[table] = rows
         except Exception as e:
-            logger.warning(f"Backup: failed to read table {table}: {e}")
-            backup_data[table] = []
+            # A partial backup is unsafe: it can look valid while silently
+            # omitting all data from a table after an auth/config failure.
+            logger.error(f"Backup: failed to read table {table}: {e}")
+            raise RuntimeError(f"Could not read Supabase table '{table}': {e}") from e
 
     return {
         "success": True,
@@ -377,6 +379,21 @@ def restore_from_backup(backup_dict: dict) -> dict:
         and isinstance(v, str) and v.startswith("restored")
     )
     results.pop("_deletes", None)
+    if success_count == 0:
+        failed = [
+            f"{table}: {status}"
+            for table, status in results.items()
+            if isinstance(status, str) and status.startswith("failed:")
+        ]
+        return {
+            "success": False,
+            "error": (
+                "No tables were restored. Check the Supabase URL/API key and "
+                + (failed[0] if failed else "the backup contents.")
+            ),
+            "results": results,
+            "restored_tables": 0,
+        }
     return {
         "success": success_count > 0,
         "results": results,

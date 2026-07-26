@@ -32,11 +32,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # ===========================================================================
 # Server Connection
 # ===========================================================================
-HOST = "node2.serverix.cloud"
-PORT = 2022
-USERNAME = "narat_nyfy.b91aad0f"
-PASSWORD = "Narat(5656)"
-REMOTE_DIR = "."
+HOST = os.getenv("DEPLOY_HOST", "")
+PORT = int(os.getenv("DEPLOY_PORT", "2022"))
+USERNAME = os.getenv("DEPLOY_USERNAME", "")
+PASSWORD = os.getenv("DEPLOY_PASSWORD", "")
+REMOTE_DIR = os.getenv("DEPLOY_REMOTE_DIR", ".")
 
 # ===========================================================================
 # Code files to deploy (Python source + configs only)
@@ -66,6 +66,16 @@ DIRS = ["data", "admin", "services", "utils", "scripts"]
 
 
 def deploy():
+    missing = [
+        name for name, value in {
+            "DEPLOY_HOST": HOST,
+            "DEPLOY_USERNAME": USERNAME,
+            "DEPLOY_PASSWORD": PASSWORD,
+        }.items() if not value
+    ]
+    if missing:
+        raise RuntimeError("Missing deployment variables: " + ", ".join(missing))
+
     # ── Connect with retry ──────────────────────────────────────────
     for attempt in range(1, 6):
         try:

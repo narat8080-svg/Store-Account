@@ -681,6 +681,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         from services.database import get_bot_setting
         custom = get_bot_setting(conn, "welcome_msg", "") or ""
         welcome_photo = get_bot_setting(conn, "welcome_photo", "") or ""
+    except Exception as exc:
+        logger.exception("start(): database unavailable: %s", exc)
+        error_text = (
+            "The store is temporarily unavailable because the database "
+            "connection failed. Please try again shortly."
+        )
+        if update.message:
+            await update.message.reply_text(error_text)
+        elif update.callback_query:
+            try:
+                await update.callback_query.answer(
+                    "Database connection failed. Please try again shortly.",
+                    show_alert=True,
+                )
+            except Exception:
+                pass
+        return
     finally:
         conn.close()
 
