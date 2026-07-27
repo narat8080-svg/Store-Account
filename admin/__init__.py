@@ -78,14 +78,14 @@ from services.database import (
     export_orders_csv,
     export_users_csv,
 )
-from services.prodseller import (
-    ProdSellerError,
+from services.cluster_shop import (
+    ClusterShopError,
     apply_product_override,
     get_product_overrides,
-    get_product as get_prodseller_product,
+    get_product as get_cluster_shop_product,
     get_reseller_account,
-    is_configured as prodseller_configured,
-    list_products as list_prodseller_products,
+    is_configured as cluster_shop_configured,
+    list_products as list_cluster_shop_products,
     save_product_override,
 )
 
@@ -435,7 +435,7 @@ async def admin_products(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     keyboard = [
         [_styled_btn("➕ Add Product", "admin_add_product", "admin_dashboard")],
         [_styled_btn("✏️ Edit Product", "admin_edit_product", "admin_products")],
-        [_styled_btn("🔌 Available Products", "admin_prodseller_products", "admin_products")],
+        [_styled_btn("🔌 Available Products", "admin_cluster_shop_products", "admin_products")],
         [_styled_btn("🗑 Delete Product", "admin_del_product", "admin_close")],
         [_styled_btn("🔙 Back", "admin_panel", "admin_close")],
     ]
@@ -445,11 +445,11 @@ async def admin_products(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     )
 
 
-async def admin_prodseller_products(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def admin_cluster_shop_products(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """List live partner products with local selling-price/emoji overrides."""
     query = update.callback_query
     await query.answer()
-    if not prodseller_configured():
+    if not cluster_shop_configured():
         await query.edit_message_text(
             "🔌 <b>Available Products</b>\n\nProduct service is not configured.",
             parse_mode="HTML",
@@ -459,13 +459,13 @@ async def admin_prodseller_products(update: Update, context: ContextTypes.DEFAUL
 
     try:
         account = await get_reseller_account()
-        products = await list_prodseller_products()
+        products = await list_cluster_shop_products()
         conn = get_db()
         try:
             overrides = get_product_overrides(conn)
         finally:
             conn.close()
-    except ProdSellerError as exc:
+    except ClusterShopError as exc:
         await query.edit_message_text(
             f"❌ Could not load available products:\n\n{escape(exc.message)}",
             parse_mode="HTML",
@@ -514,7 +514,7 @@ async def admin_prodseller_products(update: Update, context: ContextTypes.DEFAUL
     )
 
 
-async def admin_prodseller_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def admin_cluster_shop_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show price and emoji controls for one available product."""
     query = update.callback_query
     await query.answer()
@@ -534,17 +534,17 @@ async def admin_prodseller_edit(update: Update, context: ContextTypes.DEFAULT_TY
     else:
         product_id = data[len("admin_ps_reset_emoji_"):]
     try:
-        product = await get_prodseller_product(product_id)
+        product = await get_cluster_shop_product(product_id)
         conn = get_db()
         try:
             overrides = get_product_overrides(conn)
         finally:
             conn.close()
-    except ProdSellerError as exc:
+    except ClusterShopError as exc:
         await query.edit_message_text(
             f"❌ {escape(exc.message)}",
             parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="admin_prodseller_products")]]),
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="admin_cluster_shop_products")]]),
         )
         return
 
@@ -591,7 +591,7 @@ async def admin_prodseller_edit(update: Update, context: ContextTypes.DEFAULT_TY
         [InlineKeyboardButton("↩️ Reset Price", callback_data=f"admin_ps_reset_price_{product_id}"),
          InlineKeyboardButton("↩️ Reset Emoji", callback_data=f"admin_ps_reset_emoji_{product_id}")],
         [InlineKeyboardButton("↩️ Reset Description", callback_data=f"admin_ps_reset_desc_{product_id}")],
-        [InlineKeyboardButton("🔙 Back", callback_data="admin_prodseller_products")],
+        [InlineKeyboardButton("🔙 Back", callback_data="admin_cluster_shop_products")],
     ]
     markup = InlineKeyboardMarkup(keyboard)
     try:
@@ -603,16 +603,16 @@ async def admin_prodseller_edit(update: Update, context: ContextTypes.DEFAULT_TY
         await query.edit_message_text(_detail_text(escape(emoji_for_button(emoji))), parse_mode="HTML", reply_markup=markup)
 
 
-async def admin_prodseller_set_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def admin_cluster_shop_set_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
     product_id = (query.data or "").replace("admin_ps_price_", "", 1)
     try:
-        product = await get_prodseller_product(product_id)
-        supplier_price = float(product.get("price", 0))
-    except (ProdSellerError, TypeError, ValueError) as exc:
-        message = exc.message if isinstance(exc, ProdSellerError) else "Invalid supplier price."
-        await query.edit_message_text(f"❌ {escape(message)}", reply_markup=_back_button("admin_prodseller_products"))
+        product = await get_cluster_shop_product(product_id)
+        supplier_price = float(product.get("supplier_price", product.get("price", 0)))
+    except (ClusterShopError, TypeError, ValueError) as exc:
+        message = exc.message if isinstance(exc, ClusterShopError) else "Invalid supplier price."
+        await query.edit_message_text(f"❌ {escape(message)}", reply_markup=_back_button("admin_cluster_shop_products"))
         return
     context.user_data["admin_state"] = "ps_price"
     context.user_data["admin_data"] = {"ps_product_id": product_id, "ps_supplier_price": supplier_price}
@@ -625,7 +625,7 @@ async def admin_prodseller_set_price(update: Update, context: ContextTypes.DEFAU
     )
 
 
-async def admin_prodseller_set_emoji(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def admin_cluster_shop_set_emoji(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
     product_id = (query.data or "").replace("admin_ps_emoji_", "", 1)
@@ -639,7 +639,7 @@ async def admin_prodseller_set_emoji(update: Update, context: ContextTypes.DEFAU
     )
 
 
-async def admin_prodseller_set_desc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def admin_cluster_shop_set_desc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Prompt for a custom description override for a partner product."""
     query = update.callback_query
     await query.answer()
@@ -655,7 +655,7 @@ async def admin_prodseller_set_desc(update: Update, context: ContextTypes.DEFAUL
     )
 
 
-async def admin_prodseller_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def admin_cluster_shop_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Ask for confirmation before clearing a product override."""
     query = update.callback_query
     await query.answer()
@@ -683,7 +683,7 @@ async def admin_prodseller_reset(update: Update, context: ContextTypes.DEFAULT_T
     )
 
 
-async def admin_prodseller_reset_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def admin_cluster_shop_reset_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Apply a confirmed product override reset."""
     query = update.callback_query
     await query.answer()
@@ -700,7 +700,7 @@ async def admin_prodseller_reset_confirm(update: Update, context: ContextTypes.D
     else:
         await query.edit_message_text(
             "❌ Invalid reset request.",
-            reply_markup=_back_button("admin_prodseller_products"),
+            reply_markup=_back_button("admin_cluster_shop_products"),
         )
         return
 
@@ -709,7 +709,7 @@ async def admin_prodseller_reset_confirm(update: Update, context: ContextTypes.D
         save_product_override(conn, product_id, **{field: None})
     finally:
         conn.close()
-    await admin_prodseller_edit(update, context)
+    await admin_cluster_shop_edit(update, context)
 
 
 async def admin_add_product_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

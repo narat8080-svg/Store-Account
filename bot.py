@@ -49,14 +49,14 @@ from services.database import (
     add_balance,  # used for negative balance (deduct)
 )
 from services.khqrpay import create_aba_qr, verify_aba_payment, get_khqrpay_config
-from services.prodseller import (
-    ProdSellerError,
+from services.cluster_shop import (
+    ClusterShopError,
     apply_product_override,
-    create_order as create_prodseller_order,
+    create_order as create_cluster_shop_order,
     get_product_overrides,
-    get_product as get_prodseller_product,
-    is_configured as prodseller_configured,
-    list_products as list_prodseller_products,
+    get_product as get_cluster_shop_product,
+    is_configured as cluster_shop_configured,
+    list_products as list_cluster_shop_products,
 )
 
 # Admin imports
@@ -76,13 +76,13 @@ from admin import (
     admin_editcat_name,
     admin_editcat_emoji,
     admin_products,
-    admin_prodseller_products,
-    admin_prodseller_edit,
-    admin_prodseller_set_price,
-    admin_prodseller_set_emoji,
-    admin_prodseller_set_desc,
-    admin_prodseller_reset,
-    admin_prodseller_reset_confirm,
+    admin_cluster_shop_products,
+    admin_cluster_shop_edit,
+    admin_cluster_shop_set_price,
+    admin_cluster_shop_set_emoji,
+    admin_cluster_shop_set_desc,
+    admin_cluster_shop_reset,
+    admin_cluster_shop_reset_confirm,
     admin_add_product_start,
     admin_prod_cat_selected,
     admin_del_product_start,
@@ -192,7 +192,7 @@ logger = logging.getLogger(__name__)
 # ===========================================================================
 _user_cache: dict[int, dict] = {}  # user_id → user dict
 _cache_hits = 0
-_prodseller_locks: dict[int, asyncio.Lock] = {}
+_cluster_shop_locks: dict[int, asyncio.Lock] = {}
 
 
 def _cached_get_user(conn, user_id: int, username=None, first_name=None) -> dict:
@@ -1166,24 +1166,24 @@ async def product_categories(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # like a new checkout attempt.
     context.user_data.pop("buy_state", None)
     context.user_data.pop("buy_data", None)
-    context.user_data.pop("prodseller_idempotency_key", None)
+    context.user_data.pop("cluster_shop_idempotency_key", None)
 
     from services.database import get_all_products
 
     supplier_products = []
     supplier_overrides = {}
     supplier_error = None
-    if prodseller_configured():
+    if cluster_shop_configured():
         try:
-            supplier_products = await list_prodseller_products()
+            supplier_products = await list_cluster_shop_products()
             conn = get_db()
             try:
                 supplier_overrides = get_product_overrides(conn)
             finally:
                 conn.close()
-        except ProdSellerError as exc:
+        except ClusterShopError as exc:
             supplier_error = exc.message
-            logger.warning("ProdSeller product list failed: %s", exc)
+            logger.warning("Cluster Shop product list failed: %s", exc)
 
     conn = get_db()
     try:
@@ -1303,9 +1303,9 @@ async def product_categories(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 # ===========================================================================
-# PRODSELLER BUY FLOW (supplier catalog + local wallet payment)
+# CLUSTER SHOP BUY FLOW (supplier catalog + local wallet payment)
 # ===========================================================================
-def _prodseller_stock_label(product: dict) -> tuple[str, int | None]:
+def _cluster_shop_stock_label(product: dict) -> tuple[str, int | None]:
     """Return a user-facing stock label and numeric stock limit, if known."""
     stock = product.get("stock")
     if product.get("inStock") is False or stock == 0:
@@ -1315,7 +1315,7 @@ def _prodseller_stock_label(product: dict) -> tuple[str, int | None]:
     return "Available", None
 
 
-def _prodseller_sale_product(product: dict) -> dict:
+def _cluster_shop_sale_product(product: dict) -> dict:
     """Apply the admin's persisted selling price and emoji override."""
     conn = get_db()
     try:
@@ -1325,14 +1325,14 @@ def _prodseller_sale_product(product: dict) -> dict:
     return apply_product_override(product, overrides)
 
 
-def _prodseller_price_guard(product: dict) -> tuple[float, float, bool]:
+def _cluster_shop_price_guard(product: dict) -> tuple[float, float, bool]:
     """Return (selling price, current supplier cost, safe-to-sell)."""
     selling_price = float(product.get("price", 0))
     supplier_price = float(product.get("supplier_price", selling_price))
     return selling_price, supplier_price, selling_price >= supplier_price
 
 
-def _prodseller_error_text(exc: ProdSellerError) -> str:
+def _cluster_shop_error_text(exc: ClusterShopError) -> str:
     if exc.status == 402:
         return "The supplier balance is insufficient. Please contact the administrator."
     if exc.status == 409:
@@ -1342,7 +1342,7 @@ def _prodseller_error_text(exc: ProdSellerError) -> str:
     return exc.message
 
 
-def _prodseller_description_html(value) -> str:
+def _cluster_shop_description_html(value) -> str:
     """Render rich admin descriptions while escaping plain API text."""
     raw = str(value or "")
     if not raw:
@@ -1352,7 +1352,7 @@ def _prodseller_description_html(value) -> str:
     return escape(raw)
 
 
-async def prodseller_buy_detail(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cluster_shop_buy_detail(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show a live partner product and ask for quantity."""
     query = update.callback_query
     await query.answer()
@@ -1362,17 +1362,17 @@ async def prodseller_buy_detail(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     try:
-        product = await get_prodseller_product(product_id)
-        product = _prodseller_sale_product(product)
-    except ProdSellerError as exc:
+        product = await get_cluster_shop_product(product_id)
+        product = _cluster_shop_sale_product(product)
+    except ClusterShopError as exc:
         await query.edit_message_text(
-            f"❌ {escape(_prodseller_error_text(exc))}",
+            f"❌ {escape(_cluster_shop_error_text(exc))}",
             parse_mode="HTML",
             reply_markup=_back_button("menu_product"),
         )
         return
 
-    stock_label, stock_limit = _prodseller_stock_label(product)
+    stock_label, stock_limit = _cluster_shop_stock_label(product)
     if stock_limit == 0:
         await query.edit_message_text(
             f"❌ <b>Out of Stock</b>\n\n{escape(str(product.get('name') or 'Product'))}",
@@ -1385,7 +1385,7 @@ async def prodseller_buy_detail(update: Update, context: ContextTypes.DEFAULT_TY
         price = float(product.get("price", 0))
     except (TypeError, ValueError):
         price = 0.0
-    _, supplier_price, price_safe = _prodseller_price_guard(product)
+    _, supplier_price, price_safe = _cluster_shop_price_guard(product)
     if not price_safe:
         await query.edit_message_text(
             f"❌ This product's selling price is below the current supplier cost (${supplier_price:.2f}). Please contact the administrator.",
@@ -1393,9 +1393,9 @@ async def prodseller_buy_detail(update: Update, context: ContextTypes.DEFAULT_TY
         )
         return
     name = escape(str(product.get("name") or "Product"))
-    description = _prodseller_description_html(product.get("description"))
+    description = _cluster_shop_description_html(product.get("description"))
     description_line = f"\n{E('description')} {description}" if description else ""
-    context.user_data["buy_state"] = "prodseller_qty"
+    context.user_data["buy_state"] = "cluster_shop_qty"
     context.user_data["buy_data"] = {"product_id": product_id}
 
     await query.edit_message_text(
@@ -1411,7 +1411,7 @@ async def prodseller_buy_detail(update: Update, context: ContextTypes.DEFAULT_TY
     )
 
 
-async def _handle_prodseller_qty(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def _handle_cluster_shop_qty(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Validate quantity and show the supplier payment choices."""
     if not update.message:
         return
@@ -1430,13 +1430,13 @@ async def _handle_prodseller_qty(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     try:
-        product = await get_prodseller_product(str(product_id))
-        product = _prodseller_sale_product(product)
-    except ProdSellerError as exc:
-        await update.message.reply_html(f"❌ {escape(_prodseller_error_text(exc))}")
+        product = await get_cluster_shop_product(str(product_id))
+        product = _cluster_shop_sale_product(product)
+    except ClusterShopError as exc:
+        await update.message.reply_html(f"❌ {escape(_cluster_shop_error_text(exc))}")
         return
 
-    stock_label, stock_limit = _prodseller_stock_label(product)
+    stock_label, stock_limit = _cluster_shop_stock_label(product)
     if stock_limit == 0 or (stock_limit is not None and quantity > stock_limit):
         await update.message.reply_html(
             f"❌ Only <b>{stock_label}</b> available. Enter a smaller quantity:"
@@ -1448,21 +1448,21 @@ async def _handle_prodseller_qty(update: Update, context: ContextTypes.DEFAULT_T
     except (TypeError, ValueError):
         await update.message.reply_html("❌ Supplier returned an invalid product price.")
         return
-    _, supplier_price, price_safe = _prodseller_price_guard(product)
+    _, supplier_price, price_safe = _cluster_shop_price_guard(product)
     if not price_safe:
         await update.message.reply_html(
             f"❌ Selling price is below the supplier cost (${supplier_price:.2f}). Please contact the administrator."
         )
         return
     total = unit_price * quantity
-    context.user_data["buy_state"] = "prodseller_review"
+    context.user_data["buy_state"] = "cluster_shop_review"
     context.user_data["buy_data"] = {
         "product_id": str(product_id),
         "quantity": quantity,
         "unit_price": unit_price,
         "name": str(product.get("name") or "Product"),
     }
-    context.user_data["prodseller_idempotency_key"] = f"tg_{update.effective_user.id}_{uuid.uuid4().hex}"
+    context.user_data["cluster_shop_idempotency_key"] = f"tg_{update.effective_user.id}_{uuid.uuid4().hex}"
 
     await update.message.reply_html(
         f"✅ <b>Review Order</b>\n\n"
@@ -1481,12 +1481,12 @@ async def _handle_prodseller_qty(update: Update, context: ContextTypes.DEFAULT_T
 
 
 
-async def prodseller_wallet_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cluster_shop_wallet_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show the final wallet order confirmation after Wallet is selected."""
     query = update.callback_query
     await query.answer()
     try:
-        product_id, quantity = _parse_prodseller_order_cb(
+        product_id, quantity = _parse_cluster_shop_order_cb(
             query.data or "", "ps_wallet_"
         )
     except (ValueError, IndexError):
@@ -1498,7 +1498,7 @@ async def prodseller_wallet_confirm(update: Update, context: ContextTypes.DEFAUL
 
     checkout = context.user_data.get("buy_data") or {}
     if (
-        context.user_data.get("buy_state") != "prodseller_review"
+        context.user_data.get("buy_state") != "cluster_shop_review"
         or str(checkout.get("product_id")) != product_id
         or int(checkout.get("quantity", 0)) != quantity
     ):
@@ -1509,23 +1509,23 @@ async def prodseller_wallet_confirm(update: Update, context: ContextTypes.DEFAUL
         return
 
     try:
-        product = await get_prodseller_product(product_id)
-        product = _prodseller_sale_product(product)
-        stock_label, stock_limit = _prodseller_stock_label(product)
+        product = await get_cluster_shop_product(product_id)
+        product = _cluster_shop_sale_product(product)
+        stock_label, stock_limit = _cluster_shop_stock_label(product)
         if stock_limit == 0 or (stock_limit is not None and quantity > stock_limit):
-            raise ProdSellerError(f"Only {stock_label} available.", status=409)
+            raise ClusterShopError(f"Only {stock_label} available.", status=409)
         unit_price = float(product.get("price", 0))
         if unit_price <= 0:
-            raise ProdSellerError("Supplier returned an invalid product price.", status=502)
-        _, supplier_price, price_safe = _prodseller_price_guard(product)
+            raise ClusterShopError("Supplier returned an invalid product price.", status=502)
+        _, supplier_price, price_safe = _cluster_shop_price_guard(product)
         if not price_safe:
-            raise ProdSellerError(
+            raise ClusterShopError(
                 f"Selling price is below the supplier cost (${supplier_price:.2f}). "
                 "Please contact the administrator.",
                 status=409,
             )
-    except (ProdSellerError, ValueError, TypeError) as exc:
-        message = _prodseller_error_text(exc) if isinstance(exc, ProdSellerError) else "Invalid supplier price."
+    except (ClusterShopError, ValueError, TypeError) as exc:
+        message = _cluster_shop_error_text(exc) if isinstance(exc, ClusterShopError) else "Invalid supplier price."
         await query.edit_message_text(
             f"❌ {escape(message)}",
             parse_mode="HTML",
@@ -1534,7 +1534,7 @@ async def prodseller_wallet_confirm(update: Update, context: ContextTypes.DEFAUL
         return
 
     total = round(unit_price * quantity, 2)
-    context.user_data["buy_state"] = "prodseller_wallet_confirm"
+    context.user_data["buy_state"] = "cluster_shop_wallet_confirm"
     context.user_data["buy_data"].update({
         "unit_price": unit_price,
         "name": str(product.get("name") or "Product"),
@@ -1553,7 +1553,7 @@ async def prodseller_wallet_confirm(update: Update, context: ContextTypes.DEFAUL
     )
 
 
-async def prodseller_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cluster_shop_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Charge the customer's bot wallet and create the supplier order."""
     query = update.callback_query
     await query.answer()
@@ -1571,7 +1571,7 @@ async def prodseller_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     checkout = context.user_data.get("buy_data") or {}
     if (
-        context.user_data.get("buy_state") != "prodseller_wallet_confirm"
+        context.user_data.get("buy_state") != "cluster_shop_wallet_confirm"
         or str(checkout.get("product_id")) != product_id
         or int(checkout.get("quantity", 0)) != quantity
     ):
@@ -1582,14 +1582,14 @@ async def prodseller_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     user_id = update.effective_user.id
-    lock = _prodseller_locks.setdefault(user_id, asyncio.Lock())
+    lock = _cluster_shop_locks.setdefault(user_id, asyncio.Lock())
     async with lock:
         # A second Telegram callback can arrive while the first one is
         # waiting on the supplier. Re-check state after acquiring the lock so
         # the same wallet checkout cannot be charged twice.
         current_checkout = context.user_data.get("buy_data") or {}
         if (
-            context.user_data.get("buy_state") != "prodseller_wallet_confirm"
+            context.user_data.get("buy_state") != "cluster_shop_wallet_confirm"
             or str(current_checkout.get("product_id")) != product_id
             or int(current_checkout.get("quantity", 0)) != quantity
         ):
@@ -1600,17 +1600,17 @@ async def prodseller_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             return
 
         try:
-            product = await get_prodseller_product(product_id)
-            product = _prodseller_sale_product(product)
-        except ProdSellerError as exc:
+            product = await get_cluster_shop_product(product_id)
+            product = _cluster_shop_sale_product(product)
+        except ClusterShopError as exc:
             await query.edit_message_text(
-                f"❌ {escape(_prodseller_error_text(exc))}",
+                f"❌ {escape(_cluster_shop_error_text(exc))}",
                 parse_mode="HTML",
                 reply_markup=_back_button("menu_product"),
             )
             return
 
-        stock_label, stock_limit = _prodseller_stock_label(product)
+        stock_label, stock_limit = _cluster_shop_stock_label(product)
         if stock_limit == 0 or (stock_limit is not None and quantity > stock_limit):
             await query.edit_message_text(
                 f"❌ Only <b>{stock_label}</b> available. Please try again.",
@@ -1624,7 +1624,7 @@ async def prodseller_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         except (TypeError, ValueError):
             await query.edit_message_text("❌ Supplier returned an invalid product price.", reply_markup=_back_button("menu_product"))
             return
-        _, supplier_price, price_safe = _prodseller_price_guard(product)
+        _, supplier_price, price_safe = _cluster_shop_price_guard(product)
         if not price_safe:
             await query.edit_message_text(
                 f"❌ Selling price is below the supplier cost (${supplier_price:.2f}). Please contact the administrator.",
@@ -1659,17 +1659,17 @@ async def prodseller_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         finally:
             conn.close()
 
-        idempotency_key = context.user_data.get("prodseller_idempotency_key") or (
+        idempotency_key = context.user_data.get("cluster_shop_idempotency_key") or (
             f"tg_{user_id}_{uuid.uuid4().hex}"
         )
         try:
-            order = await create_prodseller_order(
+            order = await create_cluster_shop_order(
                 product_id,
                 quantity,
                 idempotency_key,
                 customer_reference=f"telegram_user_{user_id}",
             )
-        except ProdSellerError as exc:
+        except ClusterShopError as exc:
             # Supplier failure means the customer's wallet must be restored.
             refund_ok = True
             if charged:
@@ -1684,14 +1684,14 @@ async def prodseller_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                     logger.exception("Product service order failed and automatic wallet refund failed for user %s", user_id)
             context.user_data.pop("buy_state", None)
             context.user_data.pop("buy_data", None)
-            context.user_data.pop("prodseller_idempotency_key", None)
+            context.user_data.pop("cluster_shop_idempotency_key", None)
             refund_note = (
                 "Your Wallet charge was refunded."
                 if refund_ok
                 else "Automatic refund failed; please contact the administrator immediately."
             )
             await query.edit_message_text(
-                f"❌ <b>Supplier Order Failed</b>\n\n{escape(_prodseller_error_text(exc))}\n"
+                f"❌ <b>Supplier Order Failed</b>\n\n{escape(_cluster_shop_error_text(exc))}\n"
                 f"{refund_note}",
                 parse_mode="HTML",
                 reply_markup=_back_button("menu_product"),
@@ -1706,7 +1706,7 @@ async def prodseller_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
         context.user_data.pop("buy_state", None)
         context.user_data.pop("buy_data", None)
-        context.user_data.pop("prodseller_idempotency_key", None)
+        context.user_data.pop("cluster_shop_idempotency_key", None)
 
         delivered_keys = order.get("deliveredKeys") or []
         if not delivered_keys and order.get("deliveredKey"):
@@ -1758,7 +1758,7 @@ async def prodseller_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
 
 
-def _parse_prodseller_order_cb(data: str, prefix: str) -> tuple[str, int]:
+def _parse_cluster_shop_order_cb(data: str, prefix: str) -> tuple[str, int]:
     raw = data[len(prefix):]
     product_id, quantity_text = raw.rsplit("_", 1)
     quantity = int(quantity_text)
@@ -1767,19 +1767,19 @@ def _parse_prodseller_order_cb(data: str, prefix: str) -> tuple[str, int]:
     return product_id, quantity
 
 
-async def prodseller_khqr_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cluster_shop_khqr_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Create a KHQR payment for a partner order; supplier ordering follows confirmation."""
     query = update.callback_query
     await query.answer()
     try:
-        product_id, quantity = _parse_prodseller_order_cb(query.data or "", "ps_khqr_")
+        product_id, quantity = _parse_cluster_shop_order_cb(query.data or "", "ps_khqr_")
     except (ValueError, IndexError):
         await query.edit_message_text("❌ Invalid supplier payment request.", reply_markup=_back_button("menu_product"))
         return
 
     checkout = context.user_data.get("buy_data") or {}
     if (
-        context.user_data.get("buy_state") != "prodseller_review"
+        context.user_data.get("buy_state") != "cluster_shop_review"
         or str(checkout.get("product_id")) != product_id
         or int(checkout.get("quantity", 0)) != quantity
     ):
@@ -1791,26 +1791,26 @@ async def prodseller_khqr_start(update: Update, context: ContextTypes.DEFAULT_TY
 
     # Set this before the first await so repeated button taps cannot create
     # multiple paid QR records for the same checkout.
-    context.user_data["buy_state"] = "prodseller_payment_pending"
+    context.user_data["buy_state"] = "cluster_shop_payment_pending"
 
     try:
-        product = await get_prodseller_product(product_id)
-        product = _prodseller_sale_product(product)
-        stock_label, stock_limit = _prodseller_stock_label(product)
+        product = await get_cluster_shop_product(product_id)
+        product = _cluster_shop_sale_product(product)
+        stock_label, stock_limit = _cluster_shop_stock_label(product)
         if stock_limit == 0 or (stock_limit is not None and quantity > stock_limit):
-            raise ProdSellerError(f"Only {stock_label} available.", status=409)
+            raise ClusterShopError(f"Only {stock_label} available.", status=409)
         unit_price = float(product.get("price", 0))
         if unit_price <= 0:
-            raise ProdSellerError("Supplier returned an invalid product price.", status=502)
-        _, supplier_price, price_safe = _prodseller_price_guard(product)
+            raise ClusterShopError("Supplier returned an invalid product price.", status=502)
+        _, supplier_price, price_safe = _cluster_shop_price_guard(product)
         if not price_safe:
-            raise ProdSellerError(
+            raise ClusterShopError(
                 f"Selling price is below the supplier cost (${supplier_price:.2f}). Please contact the administrator.",
                 status=409,
             )
-    except (ProdSellerError, ValueError, TypeError) as exc:
-        context.user_data["buy_state"] = "prodseller_review"
-        message = _prodseller_error_text(exc) if isinstance(exc, ProdSellerError) else "Invalid supplier price."
+    except (ClusterShopError, ValueError, TypeError) as exc:
+        context.user_data["buy_state"] = "cluster_shop_review"
+        message = _cluster_shop_error_text(exc) if isinstance(exc, ClusterShopError) else "Invalid supplier price."
         await query.edit_message_text(f"❌ {escape(message)}", parse_mode="HTML", reply_markup=_back_button("menu_product"))
         return
 
@@ -1820,7 +1820,7 @@ async def prodseller_khqr_start(update: Update, context: ContextTypes.DEFAULT_TY
     finally:
         conn.close()
     if not cfg["profile_id"] or not cfg["secret_key"]:
-        context.user_data["buy_state"] = "prodseller_review"
+        context.user_data["buy_state"] = "cluster_shop_review"
         await query.edit_message_text(
             "❌ KHQR payment is not configured. Please contact the administrator.",
             reply_markup=_back_button("menu_product"),
@@ -1839,7 +1839,7 @@ async def prodseller_khqr_start(update: Update, context: ContextTypes.DEFAULT_TY
         remark=f"Store: {product.get('name', 'Product')} x{quantity}",
     )
     if not result.get("success"):
-        context.user_data["buy_state"] = "prodseller_review"
+        context.user_data["buy_state"] = "cluster_shop_review"
         await query.edit_message_text(
             f"❌ <b>KHQR generation failed</b>\n\n{escape(str(result.get('error') or 'Unknown gateway error'))}",
             parse_mode="HTML",
@@ -1851,7 +1851,7 @@ async def prodseller_khqr_start(update: Update, context: ContextTypes.DEFAULT_TY
     try:
         payment_id = create_payment(conn, update.effective_user.id, amount, result.get("qr_text", ""), transaction_id)
     except Exception:
-        context.user_data["buy_state"] = "prodseller_review"
+        context.user_data["buy_state"] = "cluster_shop_review"
         logger.exception("Could not persist product payment before sending QR")
         await query.edit_message_text(
             "❌ Could not create a secure payment record. No QR was sent; please try again.",
@@ -1876,7 +1876,7 @@ async def prodseller_khqr_start(update: Update, context: ContextTypes.DEFAULT_TY
             parse_mode="HTML",
         )
     except Exception:
-        context.user_data["buy_state"] = "prodseller_review"
+        context.user_data["buy_state"] = "cluster_shop_review"
         logger.exception("Could not send product KHQR image for payment %s", payment_id)
         await query.edit_message_text(
             "❌ Could not send the QR code. The payment was not shown; please try again.",
@@ -1889,7 +1889,7 @@ async def prodseller_khqr_start(update: Update, context: ContextTypes.DEFAULT_TY
     except Exception:
         pass
 
-    asyncio.create_task(_prodseller_khqr_watcher(
+    asyncio.create_task(_cluster_shop_khqr_watcher(
         payment_id=payment_id,
         cfg=cfg,
         transaction_id=transaction_id,
@@ -1905,7 +1905,7 @@ async def prodseller_khqr_start(update: Update, context: ContextTypes.DEFAULT_TY
     ))
 
 
-async def _prodseller_khqr_watcher(
+async def _cluster_shop_khqr_watcher(
     payment_id: int,
     cfg: dict,
     transaction_id: str,
@@ -1984,13 +1984,13 @@ async def _prodseller_khqr_watcher(
                 conn.close()
 
             try:
-                order = await create_prodseller_order(
+                order = await create_cluster_shop_order(
                     product_id,
                     quantity,
                     idempotency_key,
                     customer_reference=f"telegram_user_{user_id}",
                 )
-            except ProdSellerError as exc:
+            except ClusterShopError as exc:
                 # The customer's payment is never lost if the supplier fails:
                 # atomically claim one wallet compensation, then credit it.
                 credited = False
@@ -2038,7 +2038,7 @@ async def _prodseller_khqr_watcher(
                 else:
                     await _notify_payment_review(
                         context, user_id, payment_id, amount, amount,
-                        f"Supplier order failed: {_prodseller_error_text(exc)}; compensation needs manual review.",
+                        f"Supplier order failed: {_cluster_shop_error_text(exc)}; compensation needs manual review.",
                     )
                 return
 
@@ -3422,13 +3422,13 @@ async def _route_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, da
 
     # --- Buy Flow ---
     elif data.startswith("ps_product_"):
-        await prodseller_buy_detail(update, context)
+        await cluster_shop_buy_detail(update, context)
     elif data.startswith("ps_khqr_"):
-        await prodseller_khqr_start(update, context)
+        await cluster_shop_khqr_start(update, context)
     elif data.startswith("ps_wallet_confirm_"):
-        await prodseller_order(update, context)
+        await cluster_shop_order(update, context)
     elif data.startswith("ps_wallet_"):
-        await prodseller_wallet_confirm(update, context)
+        await cluster_shop_wallet_confirm(update, context)
     elif data.startswith("buy_detail_"):
         await buy_detail(update, context)
     elif data.startswith("pay_wallet_") or data.startswith("pay_khqr_"):
@@ -3479,28 +3479,28 @@ async def _route_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, da
     # --- Admin Products ---
     elif data == "admin_products":
         await admin_products(update, context)
-    elif data == "admin_prodseller_products":
-        await admin_prodseller_products(update, context)
+    elif data == "admin_cluster_shop_products":
+        await admin_cluster_shop_products(update, context)
     elif data.startswith("admin_ps_edit_"):
-        await admin_prodseller_edit(update, context)
+        await admin_cluster_shop_edit(update, context)
     elif data.startswith("admin_ps_price_"):
-        await admin_prodseller_set_price(update, context)
+        await admin_cluster_shop_set_price(update, context)
     elif data.startswith("admin_ps_emoji_"):
-        await admin_prodseller_set_emoji(update, context)
+        await admin_cluster_shop_set_emoji(update, context)
     elif data.startswith("admin_ps_desc_"):
-        await admin_prodseller_set_desc(update, context)
+        await admin_cluster_shop_set_desc(update, context)
     elif (
         data.startswith("admin_ps_reset_price_confirm_")
         or data.startswith("admin_ps_reset_emoji_confirm_")
         or data.startswith("admin_ps_reset_desc_confirm_")
     ):
-        await admin_prodseller_reset_confirm(update, context)
+        await admin_cluster_shop_reset_confirm(update, context)
     elif (
         data.startswith("admin_ps_reset_price_")
         or data.startswith("admin_ps_reset_emoji_")
         or data.startswith("admin_ps_reset_desc_")
     ):
-        await admin_prodseller_reset(update, context)
+        await admin_cluster_shop_reset(update, context)
     elif data == "admin_add_product":
         await admin_add_product_start(update, context)
     elif data.startswith("admin_prod_cat_"):
@@ -3734,8 +3734,8 @@ async def unified_text_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await handle_admin_text(update, context)
     elif context.user_data.get("buy_state") == "buy_promo":
         await handle_buy_promo(update, context)
-    elif context.user_data.get("buy_state") == "prodseller_qty":
-        await _handle_prodseller_qty(update, context)
+    elif context.user_data.get("buy_state") == "cluster_shop_qty":
+        await _handle_cluster_shop_qty(update, context)
     elif context.user_data.get("buy_state") == "buy_custom_qty":
         await _handle_custom_qty(update, context)
     elif context.user_data.get("buy_state") == "custom_deposit":

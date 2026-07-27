@@ -83,10 +83,10 @@ SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 
 # ---------------------------------------------------------------------------
-# Partner product API
-# Customers pay from the bot wallet; the product service supplies and delivers keys.
+# Cluster Shop product API
+# Customers pay from the bot wallet; Cluster Shop supplies and delivers items.
 # ---------------------------------------------------------------------------
-PRODSELLER_API_BASE_URL = os.getenv(
-    "PRODSELLER_API_BASE_URL", "https://ventetelegrambotrailway-production.up.railway.app"
+CLUSTER_SHOP_API_BASE_URL = os.getenv(
+    "CLUSTER_SHOP_API_BASE_URL", "https://pay.rapidx.me"
 ).rstrip("/")
-PRODSELLER_API_KEY = os.getenv("PRODSELLER_API_KEY", "").strip()
+CLUSTER_SHOP_API_KEY = os.getenv("CLUSTER_SHOP_API_KEY", "").strip()
