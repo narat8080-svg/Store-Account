@@ -8,6 +8,7 @@ contract at https://pay.rapidx.me.
 import asyncio
 import json
 import logging
+import time
 from urllib.parse import urlencode
 
 import aiohttp
@@ -17,6 +18,9 @@ from config import CLUSTER_SHOP_API_BASE_URL, CLUSTER_SHOP_API_KEY
 logger = logging.getLogger(__name__)
 CLUSTER_SHOP_OVERRIDES_KEY = "cluster_shop_product_overrides"
 _UNSET = object()
+_PRODUCT_CACHE_TTL = 120
+_product_cache: list[dict] | None = None
+_product_cache_at = 0.0
 
 _EMOJI_NAMES = {
     "bolt": "⚡",
@@ -264,7 +268,10 @@ async def _request(method: str, path: str, *, payload=None, query=None) -> objec
         url = f"{url}?{urlencode(query)}"
 
     try:
-        timeout = aiohttp.ClientTimeout(total=25)
+        # The live Cluster Shop catalog endpoint currently takes roughly
+        # 45 seconds to respond.  Keep enough headroom for that provider
+        # latency while caching the result for subsequent menu taps.
+        timeout = aiohttp.ClientTimeout(total=90)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.request(method, url, headers=headers, json=payload) as response:
                 try:
@@ -304,8 +311,20 @@ async def get_reseller_account() -> dict:
 
 
 async def list_products() -> list[dict]:
+    global _product_cache, _product_cache_at
+    now = time.monotonic()
+    if _product_cache is not None and now - _product_cache_at < _PRODUCT_CACHE_TTL:
+        return [dict(product) for product in _product_cache]
+
     data = await _request("GET", "/products", query={"include_manual": "false"})
-    return [_normalise_product(p) for p in _extract_products(data) if not p.get("manual_delivery")]
+    products = [
+        _normalise_product(p)
+        for p in _extract_products(data)
+        if not _as_bool(p.get("manual_delivery"), False)
+    ]
+    _product_cache = products
+    _product_cache_at = time.monotonic()
+    return [dict(product) for product in products]
 
 
 async def get_product(product_id: str) -> dict:
