@@ -50,6 +50,7 @@ CODE_FILES = [
     "services/database.py",
     "services/payment.py",
     "services/khqrpay.py",
+    "services/prodseller.py",
     "services/supabase_sync.py",
     "utils/emoji_manager.py",
     "scripts/supabase_setup.py",

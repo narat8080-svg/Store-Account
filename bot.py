@@ -1184,6 +1184,10 @@ async def product_categories(update: Update, context: ContextTypes.DEFAULT_TYPE)
         except ProdSellerError as exc:
             supplier_error = exc.message
             logger.warning("ProdSeller product list failed: %s", exc)
+    else:
+        supplier_error = (
+            "Supplier API is not configured. Set PRODSELLER_API_KEY in Railway variables."
+        )
 
     conn = get_db()
     try:
