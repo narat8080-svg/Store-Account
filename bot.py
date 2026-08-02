@@ -363,6 +363,101 @@ def _payment_amount_matches(expected, received) -> bool:
         return False
 
 
+def _bakong_fallback_configured() -> bool:
+    """Return whether the legacy Bakong SDK can be used as a QR fallback."""
+    from config import BAKONG_ACCOUNT, BAKONG_API_TOKEN
+
+    return bool(str(BAKONG_ACCOUNT or "").strip() and str(BAKONG_API_TOKEN or "").strip())
+
+
+async def _create_checkout_qr(
+    cfg: dict,
+    transaction_id: str,
+    amount: float,
+    *,
+    remark: str = "",
+    success_url: str = "",
+) -> dict:
+    """Create a checkout QR, falling back to direct Bakong when KHQRPay is unavailable.
+
+    KHQRPay remains the primary provider. A stale/invalid KHQRPay merchant
+    profile returns HTTP 404 before any payment can be created; in that case
+    the already-configured Bakong SDK can still generate and verify a KHQR.
+    """
+    has_khqrpay = bool(cfg.get("profile_id") and cfg.get("secret_key"))
+    result = {"success": False, "error": "KHQRPay is not configured."}
+    if has_khqrpay:
+        result = await create_aba_qr(
+            profile_id=cfg["profile_id"],
+            secret_key=cfg["secret_key"],
+            transaction_id=transaction_id,
+            amount=amount,
+            success_url=success_url or "https://t.me/storeaccount_bot",
+            remark=remark,
+        )
+        if result.get("success"):
+            result["payment_provider"] = "khqrpay"
+            result["payment_reference"] = transaction_id
+            return result
+
+    error_text = str(result.get("error") or "")
+    can_fallback = _bakong_fallback_configured() and (
+        not has_khqrpay or "404" in error_text or "profile" in error_text.lower()
+    )
+    if not can_fallback:
+        return result
+
+    logger.warning("KHQRPay QR creation failed; trying direct Bakong fallback: %s", error_text)
+    try:
+        from services.payment import create_khqr
+
+        fallback = await create_khqr(amount, transaction_id)
+    except Exception as exc:
+        logger.exception("Direct Bakong QR fallback failed")
+        fallback = {"success": False, "error": str(exc)}
+
+    if fallback.get("success"):
+        return {
+            "success": True,
+            "qr_image_url": fallback.get("qr_image"),
+            "qr_text": fallback.get("qr_text", ""),
+            "md5": fallback.get("qr_md5", ""),
+            "amount": amount,
+            "transaction_id": transaction_id,
+            "payment_provider": "bakong",
+            "payment_reference": fallback.get("qr_md5", ""),
+        }
+
+    return {
+        "success": False,
+        "error": (
+            f"KHQRPay could not create the merchant QR ({error_text or 'configuration error'}). "
+            f"Bakong fallback also failed: {fallback.get('error', 'unknown error')}"
+        ),
+    }
+
+
+async def _verify_checkout_payment(
+    cfg: dict,
+    transaction_id: str,
+    *,
+    payment_provider: str = "khqrpay",
+    payment_reference: str | None = None,
+) -> dict:
+    """Verify either a KHQRPay transaction or a direct Bakong QR MD5."""
+    if payment_provider == "bakong":
+        from services.payment import check_payment
+
+        result = await check_payment(payment_reference or transaction_id)
+        return {
+            "success": True,
+            "paid": bool(result.get("paid")),
+            "amount": result.get("amount"),
+            "currency": "USD",
+        }
+    return await verify_aba_payment(cfg["profile_id"], cfg["secret_key"], transaction_id)
+
+
 async def _notify_payment_review(
     context,
     user_id: int,
@@ -980,7 +1075,7 @@ async def deposit_create_checkout(update: Update, context: ContextTypes.DEFAULT_
     finally:
         conn.close()
 
-    if not cfg["profile_id"] or not cfg["secret_key"]:
+    if (not cfg["profile_id"] or not cfg["secret_key"]) and not _bakong_fallback_configured():
         await query.edit_message_text(
             f"{E('error')} Payment gateway not configured.\nContact admin.",
             parse_mode="HTML", reply_markup=_back_button("menu_wallet"),
@@ -992,11 +1087,10 @@ async def deposit_create_checkout(update: Update, context: ContextTypes.DEFAULT_
         parse_mode="HTML",
     )
 
-    result = await create_aba_qr(
-        profile_id=cfg["profile_id"],
-        secret_key=cfg["secret_key"],
-        transaction_id=transaction_id,
-        amount=amount,
+    result = await _create_checkout_qr(
+        cfg,
+        transaction_id,
+        amount,
         success_url=cfg["aba_url"] or "https://t.me/storeaccount_bot",
         remark=f"Deposit for {user.id}",
     )
@@ -1011,7 +1105,9 @@ async def deposit_create_checkout(update: Update, context: ContextTypes.DEFAULT_
     # Store pending payment
     conn = get_db()
     try:
-        payment_id = create_payment(conn, user.id, amount, result["qr_text"], transaction_id)
+        payment_id = create_payment(
+            conn, user.id, amount, result.get("qr_text", ""), result.get("payment_reference", transaction_id)
+        )
     except Exception:
         logger.exception("Could not persist deposit payment before sending QR")
         await query.edit_message_text(
@@ -1044,6 +1140,8 @@ async def deposit_create_checkout(update: Update, context: ContextTypes.DEFAULT_
         payment_id=payment_id, cfg=cfg, transaction_id=transaction_id,
         amount=amount, user_id=user.id, chat_id=query.message.chat_id,
         message_id=msg.message_id, context=context,
+        payment_provider=result.get("payment_provider", "khqrpay"),
+        payment_reference=result.get("payment_reference", transaction_id),
     ))
 
 
@@ -1051,6 +1149,8 @@ async def _khqrpay_watcher(
     payment_id: int, cfg: dict, transaction_id: str, amount: float,
     user_id: int, chat_id: int, message_id: int,
     context: ContextTypes.DEFAULT_TYPE,
+    payment_provider: str = "khqrpay",
+    payment_reference: str | None = None,
 ) -> None:
     """Poll ABA Pay for confirmation, then credit balance."""
     from services.database import mark_payment_paid, add_balance, get_db
@@ -1078,7 +1178,12 @@ async def _khqrpay_watcher(
             except Exception:
                 pass
 
-        result = await verify_aba_payment(cfg["profile_id"], cfg["secret_key"], transaction_id)
+        result = await _verify_checkout_payment(
+            cfg,
+            transaction_id,
+            payment_provider=payment_provider,
+            payment_reference=payment_reference,
+        )
         if result.get("paid"):
             received_amount = result.get("amount")
             received_currency = str(result.get("currency") or "").upper()
@@ -1878,7 +1983,7 @@ async def prodseller_khqr_start(update: Update, context: ContextTypes.DEFAULT_TY
         cfg = get_khqrpay_config(conn)
     finally:
         conn.close()
-    if not cfg["profile_id"] or not cfg["secret_key"]:
+    if (not cfg["profile_id"] or not cfg["secret_key"]) and not _bakong_fallback_configured():
         context.user_data["buy_state"] = "prodseller_review"
         await query.edit_message_text(
             "❌ KHQR payment is not configured. Please contact the administrator.",
@@ -1889,11 +1994,10 @@ async def prodseller_khqr_start(update: Update, context: ContextTypes.DEFAULT_TY
     amount = round(unit_price * quantity, 2)
     transaction_id = f"PS-{uuid.uuid4().hex[:16].upper()}"
     await query.edit_message_text("⏳ <b>Generating KHQR payment...</b>", parse_mode="HTML")
-    result = await create_aba_qr(
-        profile_id=cfg["profile_id"],
-        secret_key=cfg["secret_key"],
-        transaction_id=transaction_id,
-        amount=amount,
+    result = await _create_checkout_qr(
+        cfg,
+        transaction_id,
+        amount,
         success_url=cfg["aba_url"] or "https://t.me/storeaccount_bot",
         remark=f"Store: {product.get('name', 'Product')} x{quantity}",
     )
@@ -1908,7 +2012,9 @@ async def prodseller_khqr_start(update: Update, context: ContextTypes.DEFAULT_TY
 
     conn = get_db()
     try:
-        payment_id = create_payment(conn, update.effective_user.id, amount, result.get("qr_text", ""), transaction_id)
+        payment_id = create_payment(
+            conn, update.effective_user.id, amount, result.get("qr_text", ""), result.get("payment_reference", transaction_id)
+        )
     except Exception:
         context.user_data["buy_state"] = "prodseller_review"
         logger.exception("Could not persist product payment before sending QR")
@@ -1961,6 +2067,8 @@ async def prodseller_khqr_start(update: Update, context: ContextTypes.DEFAULT_TY
         product_name=str(product.get("name") or "Product"),
         idempotency_key=f"pskhqr_{update.effective_user.id}_{payment_id}",
         context=context,
+        payment_provider=result.get("payment_provider", "khqrpay"),
+        payment_reference=result.get("payment_reference", transaction_id),
     ))
 
 
@@ -1977,6 +2085,8 @@ async def _prodseller_khqr_watcher(
     product_name: str,
     idempotency_key: str,
     context: ContextTypes.DEFAULT_TYPE,
+    payment_provider: str = "khqrpay",
+    payment_reference: str | None = None,
 ) -> None:
     """Verify exact payment, then order from the product service and deliver the keys."""
     import time
@@ -2002,7 +2112,12 @@ async def _prodseller_khqr_watcher(
             except Exception:
                 pass
 
-        result = await verify_aba_payment(cfg["profile_id"], cfg["secret_key"], transaction_id)
+        result = await _verify_checkout_payment(
+            cfg,
+            transaction_id,
+            payment_provider=payment_provider,
+            payment_reference=payment_reference,
+        )
         if result.get("paid"):
             received_amount = result.get("amount")
             received_currency = str(result.get("currency") or "").upper()
@@ -2598,7 +2713,7 @@ async def pay_khqr_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
-    if not cfg["profile_id"] or not cfg["secret_key"]:
+    if (not cfg["profile_id"] or not cfg["secret_key"]) and not _bakong_fallback_configured():
         await query.edit_message_text(
             f"{E('error')} Payment gateway not configured.",
             reply_markup=_back_button("menu_product"),
@@ -2639,11 +2754,10 @@ async def pay_khqr_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         parse_mode="HTML",
     )
 
-    result = await create_aba_qr(
-        profile_id=cfg["profile_id"],
-        secret_key=cfg["secret_key"],
-        transaction_id=transaction_id,
-        amount=total_price,
+    result = await _create_checkout_qr(
+        cfg,
+        transaction_id,
+        total_price,
         success_url=cfg["aba_url"] or "https://t.me/storeaccount_bot",
         remark=f"Order: {prod['name']} x{qty}",
     )
@@ -2657,7 +2771,9 @@ async def pay_khqr_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     conn = get_db()
     try:
-        payment_id = create_payment(conn, user.id, total_price, result["qr_text"], transaction_id)
+        payment_id = create_payment(
+            conn, user.id, total_price, result.get("qr_text", ""), result.get("payment_reference", transaction_id)
+        )
     except Exception:
         logger.exception("Could not persist order payment before sending QR")
         await query.edit_message_text(
@@ -2695,6 +2811,8 @@ async def pay_khqr_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         unit_price=unit_price,
         original_price=price,
         context=context,
+        payment_provider=result.get("payment_provider", "khqrpay"),
+        payment_reference=result.get("payment_reference", transaction_id),
     ))
 
 
@@ -2712,6 +2830,8 @@ async def _khqrpay_order_watcher(
     unit_price: float,
     original_price: float,
     context: ContextTypes.DEFAULT_TYPE,
+    payment_provider: str = "khqrpay",
+    payment_reference: str | None = None,
 ) -> None:
     """Poll ABA Pay for order payment; on success, assign stock and deliver."""
     import time
@@ -2746,7 +2866,12 @@ async def _khqrpay_order_watcher(
             except Exception:
                 pass
 
-        result = await verify_aba_payment(cfg["profile_id"], cfg["secret_key"], transaction_id)
+        result = await _verify_checkout_payment(
+            cfg,
+            transaction_id,
+            payment_provider=payment_provider,
+            payment_reference=payment_reference,
+        )
         if result.get("paid"):
             received_amount = result.get("amount")
             received_currency = str(result.get("currency") or "").upper()
@@ -3973,7 +4098,7 @@ async def _handle_custom_deposit(update: Update, context: ContextTypes.DEFAULT_T
     finally:
         conn.close()
 
-    if not cfg["profile_id"] or not cfg["secret_key"]:
+    if (not cfg["profile_id"] or not cfg["secret_key"]) and not _bakong_fallback_configured():
         await update.message.reply_html(
             "❌ Payment gateway not configured. Contact admin.",
             reply_markup=_back_button("menu_wallet"),
@@ -3981,11 +4106,10 @@ async def _handle_custom_deposit(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     transaction_id = f"RAT-{uuid.uuid4().hex[:8].upper()}"
-    result = await create_aba_qr(
-        profile_id=cfg["profile_id"],
-        secret_key=cfg["secret_key"],
-        transaction_id=transaction_id,
-        amount=amount,
+    result = await _create_checkout_qr(
+        cfg,
+        transaction_id,
+        amount,
         remark=f"Custom deposit for {user.id}",
     )
 
@@ -3995,7 +4119,9 @@ async def _handle_custom_deposit(update: Update, context: ContextTypes.DEFAULT_T
 
     conn = get_db()
     try:
-        payment_id = create_payment(conn, user.id, amount, result["qr_text"], transaction_id)
+        payment_id = create_payment(
+            conn, user.id, amount, result.get("qr_text", ""), result.get("payment_reference", transaction_id)
+        )
     finally:
         conn.close()
 
@@ -4019,6 +4145,8 @@ async def _handle_custom_deposit(update: Update, context: ContextTypes.DEFAULT_T
         chat_id=update.effective_chat.id,
         message_id=msg.message_id,
         context=context,
+        payment_provider=result.get("payment_provider", "khqrpay"),
+        payment_reference=result.get("payment_reference", transaction_id),
     ))
 
 
