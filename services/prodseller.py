@@ -15,6 +15,8 @@ from config import PRODSELLER_API_BASE_URL, PRODSELLER_API_KEY
 
 logger = logging.getLogger(__name__)
 PRODSELLER_OVERRIDES_KEY = "prodseller_product_overrides"
+PRODSELLER_VISIBILITY_KEY = "prodseller_product_visibility"
+PRODSELLER_KNOWN_PRODUCTS_KEY = "prodseller_known_products"
 _UNSET = object()
 
 _EMOJI_NAMES = {
@@ -155,6 +157,61 @@ def save_product_override(conn, product_id: str, *, price=_UNSET, emoji=_UNSET, 
         overrides.pop(key, None)
     set_bot_setting(conn, PRODSELLER_OVERRIDES_KEY, json.dumps(overrides, ensure_ascii=False))
     return entry
+
+
+def _load_json_setting(conn, key: str, default):
+    """Load one JSON bot setting without allowing malformed data to break the UI."""
+    from services.database import get_bot_setting
+
+    raw = get_bot_setting(conn, key, None)
+    if raw in (None, ""):
+        return default
+    try:
+        value = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError):
+        logger.warning("Invalid JSON in bot setting %s; using defaults", key)
+        return default
+    return value
+
+
+def get_product_visibility(conn) -> dict:
+    """Return supplier product visibility keyed by supplier product ID.
+
+    Missing IDs intentionally default to public for backwards compatibility.
+    The catalog watcher explicitly stores newly discovered IDs as private.
+    """
+    value = _load_json_setting(conn, PRODSELLER_VISIBILITY_KEY, {})
+    return value if isinstance(value, dict) else {}
+
+
+def set_product_public(conn, product_id: str, is_public: bool) -> dict:
+    """Persist whether one supplier product is visible in the public shop."""
+    from services.database import set_bot_setting
+
+    visibility = get_product_visibility(conn)
+    visibility[str(product_id)] = bool(is_public)
+    set_bot_setting(conn, PRODSELLER_VISIBILITY_KEY, json.dumps(visibility, ensure_ascii=False))
+    return visibility
+
+
+def get_known_product_ids(conn) -> set[str] | None:
+    """Return the IDs already seen by the catalog watcher, or None on first run."""
+    value = _load_json_setting(conn, PRODSELLER_KNOWN_PRODUCTS_KEY, None)
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return {str(item) for item in value if item is not None}
+    if isinstance(value, dict):
+        return {str(item) for item in value}
+    return set()
+
+
+def save_known_product_ids(conn, product_ids) -> None:
+    """Persist the supplier IDs used for new-product detection."""
+    from services.database import set_bot_setting
+
+    ids = sorted({str(item) for item in product_ids if item is not None})
+    set_bot_setting(conn, PRODSELLER_KNOWN_PRODUCTS_KEY, json.dumps(ids, ensure_ascii=False))
 
 
 def apply_product_override(product: dict, overrides: dict | None = None) -> dict:

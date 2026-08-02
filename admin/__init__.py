@@ -82,6 +82,8 @@ from services.prodseller import (
     ProdSellerError,
     apply_product_override,
     get_product_overrides,
+    get_product_visibility,
+    set_product_public,
     get_product as get_prodseller_product,
     get_reseller_account,
     is_configured as prodseller_configured,
@@ -241,6 +243,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     keyboard = [
         [_styled_btn("📊 Dashboard", "admin_dashboard", "admin_dashboard")],
         [_styled_btn("📦 Products", "admin_products", "admin_products")],
+        [_styled_btn("🔔 API Product Alerts", "admin_product_alerts", "admin_products")],
         [_styled_btn("📥 Stock", "admin_stock_menu", "admin_stock"),
          _styled_btn("🎟 Promos", "admin_promos", "admin_promos")],
         [_styled_btn("👥 Users", "admin_users", "admin_users_btn"),
@@ -436,12 +439,82 @@ async def admin_products(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         [_styled_btn("➕ Add Product", "admin_add_product", "admin_dashboard")],
         [_styled_btn("✏️ Edit Product", "admin_edit_product", "admin_products")],
         [_styled_btn("🔌 Available Products", "admin_prodseller_products", "admin_products")],
+        [_styled_btn("🔔 API Product Alerts", "admin_product_alerts", "admin_products")],
         [_styled_btn("🗑 Delete Product", "admin_del_product", "admin_close")],
         [_styled_btn("🔙 Back", "admin_panel", "admin_close")],
     ]
 
     await query.edit_message_text(
         text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def admin_product_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show supplier products waiting for admin review/publication."""
+    query = update.callback_query
+    await query.answer()
+    if not prodseller_configured():
+        await query.edit_message_text(
+            "🔔 <b>API Product Alerts</b>\n\nProduct service is not configured.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="admin_panel")]]),
+        )
+        return
+
+    try:
+        products = await list_prodseller_products()
+        conn = get_db()
+        try:
+            overrides = get_product_overrides(conn)
+            visibility = get_product_visibility(conn)
+        finally:
+            conn.close()
+    except ProdSellerError as exc:
+        await query.edit_message_text(
+            f"❌ Could not load API product alerts:\n\n{escape(exc.message)}",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="admin_panel")]]),
+        )
+        return
+
+    pending = [
+        product for product in products
+        if str(product.get("id") or "").strip()
+        and visibility.get(str(product.get("id")).strip()) is False
+    ]
+    if not pending:
+        text = (
+            "🔔 <b>API Product Alerts</b>\n\n"
+            "✅ No unpublished API products are waiting for review.\n\n"
+            "New supplier products will appear here automatically."
+        )
+        buttons = []
+    else:
+        lines = ["🔔 <b>API Product Alerts</b>", "", "Products are hidden until you press Public:", ""]
+        buttons = []
+        for raw_product in pending:
+            product_id = str(raw_product.get("id") or "").strip()
+            product = apply_product_override(raw_product, overrides)
+            try:
+                sell_price = float(product.get("price", 0))
+            except (TypeError, ValueError):
+                sell_price = 0.0
+            lines.append(
+                f"🔒 <b>{escape(str(product.get('name') or 'Product'))}</b> — ${sell_price:.2f}"
+            )
+            buttons.append([_cat_btn(
+                f"🔒 {str(product.get('name') or 'Product')[:32]}",
+                f"admin_ps_edit_{product_id}",
+                product.get("emoji", "📦"),
+            )])
+        text = "\n".join(lines)
+
+    buttons.append([InlineKeyboardButton("🔄 Refresh", callback_data="admin_product_alerts")])
+    buttons.append([InlineKeyboardButton("🔙 Admin Panel", callback_data="admin_panel")])
+    await query.edit_message_text(
+        text,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(buttons),
     )
 
 
@@ -463,6 +536,7 @@ async def admin_prodseller_products(update: Update, context: ContextTypes.DEFAUL
         conn = get_db()
         try:
             overrides = get_product_overrides(conn)
+            visibility = get_product_visibility(conn)
         finally:
             conn.close()
     except ProdSellerError as exc:
@@ -495,9 +569,11 @@ async def admin_prodseller_products(update: Update, context: ContextTypes.DEFAUL
                 continue
             product = apply_product_override(raw_product, overrides)
             stock = "Out of Stock" if raw_product.get("inStock") is False else "In Stock"
+            is_public = visibility.get(product_id, True) is not False
             lines.append(
                 f"<b>{escape(str(product.get('name') or 'Product'))}</b>\n"
-                f"   Cost: ${float(product.get('supplier_price', 0)):.2f} | Sell: ${float(product.get('price', 0)):.2f} | {stock}"
+                f"   Cost: ${float(product.get('supplier_price', 0)):.2f} | Sell: ${float(product.get('price', 0)):.2f} | {stock}\n"
+                f"   Public in bot: <b>{'Yes' if is_public else 'No'}</b>"
             )
             buttons.append([_cat_btn(
                 str(product.get("name") or "Product")[:35],
@@ -538,6 +614,7 @@ async def admin_prodseller_edit(update: Update, context: ContextTypes.DEFAULT_TY
         conn = get_db()
         try:
             overrides = get_product_overrides(conn)
+            visibility = get_product_visibility(conn)
         finally:
             conn.close()
     except ProdSellerError as exc:
@@ -555,6 +632,7 @@ async def admin_prodseller_edit(update: Update, context: ContextTypes.DEFAULT_TY
     price_override = (overrides.get(str(product_id)) or {}).get("price")
     emoji_override = (overrides.get(str(product_id)) or {}).get("emoji")
     desc_override = (overrides.get(str(product_id)) or {}).get("description")
+    is_public = visibility.get(str(product_id), True) is not False
     api_description = str(api_product.get("description") or "").strip()
     description = str(product.get("description") or "").strip()
 
@@ -582,12 +660,17 @@ async def admin_prodseller_edit(update: Update, context: ContextTypes.DEFAULT_TY
             f"Price override: {'Yes' if price_override is not None else 'No'}\n"
             f"Emoji override: {'Yes' if emoji_override else 'No'}\n"
             f"Description override: {'Yes' if desc_override else 'No'}"
+            f"\nPublic in bot: <b>{'Yes' if is_public else 'No'}</b>"
         )
 
     keyboard = [
         [InlineKeyboardButton("💰 Set Selling Price", callback_data=f"admin_ps_price_{product_id}")],
         [InlineKeyboardButton("🎨 Set Premium Emoji", callback_data=f"admin_ps_emoji_{product_id}")],
         [InlineKeyboardButton("📝 Edit Description", callback_data=f"admin_ps_desc_{product_id}")],
+        [InlineKeyboardButton(
+            "🔒 Make Private" if is_public else "🌐 Public on Bot",
+            callback_data=f"admin_ps_public_{product_id}",
+        )],
         [InlineKeyboardButton("↩️ Reset Price", callback_data=f"admin_ps_reset_price_{product_id}"),
          InlineKeyboardButton("↩️ Reset Emoji", callback_data=f"admin_ps_reset_emoji_{product_id}")],
         [InlineKeyboardButton("↩️ Reset Description", callback_data=f"admin_ps_reset_desc_{product_id}")],
@@ -601,6 +684,24 @@ async def admin_prodseller_edit(update: Update, context: ContextTypes.DEFAULT_TY
             return
         # Premium <tg-emoji> can be rejected by Telegram — retry with the plain fallback char.
         await query.edit_message_text(_detail_text(escape(emoji_for_button(emoji))), parse_mode="HTML", reply_markup=markup)
+
+
+async def admin_prodseller_toggle_public(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Toggle whether a supplier product appears in the public shop."""
+    query = update.callback_query
+    await query.answer()
+    product_id = (query.data or "").replace("admin_ps_public_", "", 1).strip()
+    if not product_id:
+        await query.edit_message_text("❌ Invalid product.", reply_markup=_back_button("admin_product_alerts"))
+        return
+    conn = get_db()
+    try:
+        visibility = get_product_visibility(conn)
+        is_public = visibility.get(product_id, True) is not False
+        set_product_public(conn, product_id, not is_public)
+    finally:
+        conn.close()
+    await admin_prodseller_edit(update, context)
 
 
 async def admin_prodseller_set_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

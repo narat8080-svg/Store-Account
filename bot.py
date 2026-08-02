@@ -26,6 +26,8 @@ from config import (
     WEBHOOK_PATH,
     AUTO_BACKUP_HOUR_UTC,
     AUTO_BACKUP_MINUTE_UTC,
+    NEW_PRODUCT_ALERT_GROUP_ID,
+    PRODUCT_ALERT_INTERVAL_SECONDS,
 )
 from utils.emoji_manager import (get as E, get_plain as EP, get_premium_id as EID,
                            emoji_for_html, emoji_for_button, emoji_premium_id,
@@ -54,6 +56,9 @@ from services.prodseller import (
     apply_product_override,
     create_order as create_prodseller_order,
     get_product_overrides,
+    get_product_visibility,
+    get_known_product_ids,
+    save_known_product_ids,
     get_product as get_prodseller_product,
     is_configured as prodseller_configured,
     list_products as list_prodseller_products,
@@ -77,12 +82,14 @@ from admin import (
     admin_editcat_emoji,
     admin_products,
     admin_prodseller_products,
+    admin_product_alerts,
     admin_prodseller_edit,
     admin_prodseller_set_price,
     admin_prodseller_set_emoji,
     admin_prodseller_set_desc,
     admin_prodseller_reset,
     admin_prodseller_reset_confirm,
+    admin_prodseller_toggle_public,
     admin_add_product_start,
     admin_prod_cat_selected,
     admin_del_product_start,
@@ -193,6 +200,7 @@ logger = logging.getLogger(__name__)
 _user_cache: dict[int, dict] = {}  # user_id → user dict
 _cache_hits = 0
 _prodseller_locks: dict[int, asyncio.Lock] = {}
+_supplier_catalog_alert_lock = asyncio.Lock()
 
 
 def _cached_get_user(conn, user_id: int, username=None, first_name=None) -> dict:
@@ -1172,6 +1180,7 @@ async def product_categories(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     supplier_products = []
     supplier_overrides = {}
+    supplier_visibility = {}
     supplier_error = None
     if prodseller_configured():
         try:
@@ -1179,6 +1188,7 @@ async def product_categories(update: Update, context: ContextTypes.DEFAULT_TYPE)
             conn = get_db()
             try:
                 supplier_overrides = get_product_overrides(conn)
+                supplier_visibility = get_product_visibility(conn)
             finally:
                 conn.close()
         except ProdSellerError as exc:
@@ -1195,7 +1205,13 @@ async def product_categories(update: Update, context: ContextTypes.DEFAULT_TYPE)
     finally:
         conn.close()
 
-    if not supplier_products and not products:
+    visible_supplier_products = [
+        product for product in supplier_products
+        if str(product.get("id") or "").strip()
+        and supplier_visibility.get(str(product.get("id")).strip()) is not False
+    ]
+
+    if not visible_supplier_products and not products:
         error_note = f"\n\n<i>Supplier unavailable: {escape(supplier_error)}</i>" if supplier_error else ""
         await query.edit_message_text(
             f"{E('product')} <b>Products</b>\n\nNo products available yet.\nPlease check back later!{error_note}",
@@ -1208,11 +1224,16 @@ async def product_categories(update: Update, context: ContextTypes.DEFAULT_TYPE)
     icon_fallbacks = {}  # callback_data → plain emoji, used if Telegram rejects premium icons
     text_sections = [f"{E('product')} <b>Products</b>"]
 
-    if supplier_products:
+    if visible_supplier_products:
         text_sections.append("\n<b>Available Products</b>")
-        for p in supplier_products:
+        for p in visible_supplier_products:
             product_id = str(p.get("id") or "").strip()
             if not product_id:
+                continue
+            # Missing visibility entries remain public for backwards
+            # compatibility. Newly discovered products are explicitly stored
+            # as private by the catalog watcher until the admin publishes them.
+            if supplier_visibility.get(product_id) is False:
                 continue
             p = apply_product_override(p, supplier_overrides)
             stock = p.get("stock")
@@ -1329,6 +1350,15 @@ def _prodseller_sale_product(product: dict) -> dict:
     return apply_product_override(product, overrides)
 
 
+def _prodseller_is_public(product_id: str) -> bool:
+    """Check the admin visibility switch before any supplier checkout step."""
+    conn = get_db()
+    try:
+        return get_product_visibility(conn).get(str(product_id), True) is not False
+    finally:
+        conn.close()
+
+
 def _prodseller_price_guard(product: dict) -> tuple[float, float, bool]:
     """Return (selling price, current supplier cost, safe-to-sell)."""
     selling_price = float(product.get("price", 0))
@@ -1367,6 +1397,12 @@ async def prodseller_buy_detail(update: Update, context: ContextTypes.DEFAULT_TY
 
     try:
         product = await get_prodseller_product(product_id)
+        if not _prodseller_is_public(product_id):
+            await query.edit_message_text(
+                "🔒 This supplier product is not public yet. Please check back later.",
+                reply_markup=_back_button("menu_product"),
+            )
+            return
         product = _prodseller_sale_product(product)
     except ProdSellerError as exc:
         await query.edit_message_text(
@@ -1435,6 +1471,13 @@ async def _handle_prodseller_qty(update: Update, context: ContextTypes.DEFAULT_T
 
     try:
         product = await get_prodseller_product(str(product_id))
+        if not _prodseller_is_public(str(product_id)):
+            context.user_data.pop("buy_state", None)
+            context.user_data.pop("buy_data", None)
+            await update.message.reply_html(
+                "🔒 This supplier product is no longer public. Please open the shop again."
+            )
+            return
         product = _prodseller_sale_product(product)
     except ProdSellerError as exc:
         await update.message.reply_html(f"❌ {escape(_prodseller_error_text(exc))}")
@@ -1514,6 +1557,8 @@ async def prodseller_wallet_confirm(update: Update, context: ContextTypes.DEFAUL
 
     try:
         product = await get_prodseller_product(product_id)
+        if not _prodseller_is_public(product_id):
+            raise ProdSellerError("This supplier product is no longer public.")
         product = _prodseller_sale_product(product)
         stock_label, stock_limit = _prodseller_stock_label(product)
         if stock_limit == 0 or (stock_limit is not None and quantity > stock_limit):
@@ -1605,6 +1650,14 @@ async def prodseller_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
         try:
             product = await get_prodseller_product(product_id)
+            if not _prodseller_is_public(product_id):
+                context.user_data.pop("buy_state", None)
+                context.user_data.pop("buy_data", None)
+                await query.edit_message_text(
+                    "🔒 This supplier product is no longer public.",
+                    reply_markup=_back_button("menu_product"),
+                )
+                return
             product = _prodseller_sale_product(product)
         except ProdSellerError as exc:
             await query.edit_message_text(
@@ -1799,6 +1852,8 @@ async def prodseller_khqr_start(update: Update, context: ContextTypes.DEFAULT_TY
 
     try:
         product = await get_prodseller_product(product_id)
+        if not _prodseller_is_public(product_id):
+            raise ProdSellerError("This supplier product is no longer public.")
         product = _prodseller_sale_product(product)
         stock_label, stock_limit = _prodseller_stock_label(product)
         if stock_limit == 0 or (stock_limit is not None and quantity > stock_limit):
@@ -3483,6 +3538,8 @@ async def _route_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, da
     # --- Admin Products ---
     elif data == "admin_products":
         await admin_products(update, context)
+    elif data == "admin_product_alerts":
+        await admin_product_alerts(update, context)
     elif data == "admin_prodseller_products":
         await admin_prodseller_products(update, context)
     elif data.startswith("admin_ps_edit_"):
@@ -3493,6 +3550,8 @@ async def _route_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, da
         await admin_prodseller_set_emoji(update, context)
     elif data.startswith("admin_ps_desc_"):
         await admin_prodseller_set_desc(update, context)
+    elif data.startswith("admin_ps_public_"):
+        await admin_prodseller_toggle_public(update, context)
     elif (
         data.startswith("admin_ps_reset_price_confirm_")
         or data.startswith("admin_ps_reset_emoji_confirm_")
@@ -4007,6 +4066,107 @@ async def _auto_backup_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             pass
 
 
+async def _supplier_catalog_alert_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Detect newly added supplier products and alert the admin group.
+
+    The first successful scan establishes a baseline without sending a burst
+    of alerts. Products discovered on later scans are private by default and
+    require an explicit admin Public action before appearing in the shop.
+    """
+    if not prodseller_configured() or not NEW_PRODUCT_ALERT_GROUP_ID:
+        return
+
+    async with _supplier_catalog_alert_lock:
+        try:
+            products = await list_prodseller_products()
+        except ProdSellerError as exc:
+            logger.warning("Supplier product alert scan failed: %s", exc.message)
+            return
+        except Exception:
+            logger.exception("Supplier product alert scan failed")
+            return
+
+        current = {
+            str(product.get("id") or "").strip(): product
+            for product in products
+            if str(product.get("id") or "").strip()
+        }
+        if not current:
+            return
+
+        conn = get_db()
+        try:
+            known = get_known_product_ids(conn)
+            visibility = get_product_visibility(conn)
+            if known is None:
+                # Existing catalog is trusted as the initial public baseline.
+                save_known_product_ids(conn, current.keys())
+                return
+
+            new_ids = [product_id for product_id in current if product_id not in known]
+            if not new_ids:
+                return
+
+            # Store the whole visibility map in one setting write. Existing
+            # explicit choices are preserved across API refreshes.
+            for product_id in new_ids:
+                visibility[product_id] = False
+            from services.database import set_bot_setting
+            import json
+            set_bot_setting(conn, "prodseller_product_visibility", json.dumps(visibility, ensure_ascii=False))
+            overrides = get_product_overrides(conn)
+        finally:
+            conn.close()
+
+        for product_id in new_ids:
+            product = apply_product_override(current[product_id], overrides)
+            name = escape(str(product.get("name") or "New API Product"))
+            description = str(product.get("description") or "").strip()
+            if len(description) > 500:
+                description = description[:500] + "..."
+            try:
+                supplier_cost = float(product.get("supplier_price", 0))
+                selling_price = float(product.get("price", 0))
+            except (TypeError, ValueError):
+                supplier_cost = selling_price = 0.0
+            stock = product.get("stock")
+            stock_text = "Available" if stock is None else str(stock)
+            text = (
+                "🔔 <b>New API Product Alert</b>\n\n"
+                f"📦 <b>{name}</b>\n"
+                f"ID: <code>{escape(product_id)}</code>\n"
+                f"Supplier cost: <b>${supplier_cost:.2f}</b>\n"
+                f"Default selling price: <b>${selling_price:.2f}</b>\n"
+                f"Stock: <b>{escape(stock_text)}</b>\n"
+                "Public in bot: <b>No</b>\n"
+            )
+            if description:
+                text += f"\nDescription: {escape(description)}\n"
+            text += "\nReview price, description, emoji, then publish it to the bot."
+            try:
+                await context.bot.send_message(
+                    chat_id=int(NEW_PRODUCT_ALERT_GROUP_ID),
+                    text=text,
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton(
+                            "🛠 Open Admin Controls",
+                            callback_data=f"admin_ps_edit_{product_id}",
+                        )
+                    ]]),
+                )
+                # Mark only successfully delivered alerts as seen. If the
+                # group is temporarily unavailable, the next scan retries it.
+                known.add(product_id)
+                retry_conn = get_db()
+                try:
+                    save_known_product_ids(retry_conn, known)
+                finally:
+                    retry_conn.close()
+            except Exception:
+                logger.exception("Could not send new supplier product alert for %s", product_id)
+
+
 async def _post_init(app: Application) -> None:
     """Schedule daily auto-backup TO Supabase at fixed UTC time."""
     if not app.job_queue:
@@ -4041,6 +4201,15 @@ async def _post_init(app: Application) -> None:
             logger.warning(f"☁️ Boot auto-backup check failed: {e}")
 
     app.job_queue.run_once(_boot_backup_if_needed, when=120, name="supabase_auto_backup_boot")
+
+    # Poll the supplier catalog independently from the daily backup. The first
+    # run establishes a quiet baseline; later new products trigger group alerts.
+    app.job_queue.run_repeating(
+        _supplier_catalog_alert_job,
+        interval=PRODUCT_ALERT_INTERVAL_SECONDS,
+        first=30,
+        name="supplier_product_alerts",
+    )
 
     logger.info(
         f"☁️ Supabase auto-backup scheduled daily at {auto_backup_schedule_label()} "

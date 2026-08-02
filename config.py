@@ -64,6 +64,12 @@ ORDER_GROUP_ID = _env_int("ORDER_GROUP_ID", -1003729530722)
 PAYMENT_GROUP_ID = _env_int("PAYMENT_GROUP_ID", -1004352483292)
 # New users joining the bot
 NEW_USER_GROUP_ID = _env_int("NEW_USER_GROUP_ID", -1004490564374)
+# New products discovered in the partner API â†’ product alert group
+NEW_PRODUCT_ALERT_GROUP_ID = _env_int("NEW_PRODUCT_ALERT_GROUP_ID", -5381819260)
+# How often the bot checks the partner catalog for newly added products.
+PRODUCT_ALERT_INTERVAL_SECONDS = max(
+    60, _env_int("PRODUCT_ALERT_INTERVAL_SECONDS", 300)
+)
 
 # Support contact
 SUPPORT_USERNAME = os.getenv("SUPPORT_USERNAME", "@Ratofficer")
