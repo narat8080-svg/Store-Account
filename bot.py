@@ -28,6 +28,7 @@ from config import (
     AUTO_BACKUP_MINUTE_UTC,
     NEW_PRODUCT_ALERT_GROUP_ID,
     PRODUCT_ALERT_INTERVAL_SECONDS,
+    PAYMENT_PROVIDER,
 )
 from utils.emoji_manager import (get as E, get_plain as EP, get_premium_id as EID,
                            emoji_for_html, emoji_for_button, emoji_premium_id,
@@ -370,6 +371,45 @@ def _bakong_fallback_configured() -> bool:
     return bool(str(BAKONG_ACCOUNT or "").strip() and str(BAKONG_API_TOKEN or "").strip())
 
 
+def _payment_provider_configured(cfg: dict) -> bool:
+    """Check only the credentials for the provider currently in use."""
+    if PAYMENT_PROVIDER == "bakong":
+        return _bakong_fallback_configured()
+    return bool(cfg.get("profile_id") and cfg.get("secret_key"))
+
+
+async def _create_bakong_checkout_qr(transaction_id: str, amount: float) -> dict:
+    """Create a direct Bakong QR without contacting KHQRPay."""
+    if not _bakong_fallback_configured():
+        return {
+            "success": False,
+            "error": "Bakong payment is not configured. Set BAKONG_ACCOUNT and BAKONG_API_TOKEN.",
+        }
+    try:
+        from services.payment import create_khqr
+
+        result = await create_khqr(amount, transaction_id)
+    except Exception as exc:
+        logger.exception("Direct Bakong QR creation failed")
+        return {"success": False, "error": f"Bakong QR creation failed: {exc}"}
+
+    if not result.get("success") or not result.get("qr_md5"):
+        return {
+            "success": False,
+            "error": str(result.get("error") or "Bakong did not return a payment reference."),
+        }
+    return {
+        "success": True,
+        "qr_image_url": result.get("qr_image"),
+        "qr_text": result.get("qr_text", ""),
+        "md5": result.get("qr_md5", ""),
+        "amount": amount,
+        "transaction_id": transaction_id,
+        "payment_provider": "bakong",
+        "payment_reference": result["qr_md5"],
+    }
+
+
 async def _create_checkout_qr(
     cfg: dict,
     transaction_id: str,
@@ -384,6 +424,9 @@ async def _create_checkout_qr(
     profile returns HTTP 404 before any payment can be created; in that case
     the already-configured Bakong SDK can still generate and verify a KHQR.
     """
+    if PAYMENT_PROVIDER == "bakong":
+        return await _create_bakong_checkout_qr(transaction_id, amount)
+
     has_khqrpay = bool(cfg.get("profile_id") and cfg.get("secret_key"))
     result = {"success": False, "error": "KHQRPay is not configured."}
     if has_khqrpay:
@@ -1075,7 +1118,7 @@ async def deposit_create_checkout(update: Update, context: ContextTypes.DEFAULT_
     finally:
         conn.close()
 
-    if (not cfg["profile_id"] or not cfg["secret_key"]) and not _bakong_fallback_configured():
+    if not _payment_provider_configured(cfg):
         await query.edit_message_text(
             f"{E('error')} Payment gateway not configured.\nContact admin.",
             parse_mode="HTML", reply_markup=_back_button("menu_wallet"),
@@ -1983,7 +2026,7 @@ async def prodseller_khqr_start(update: Update, context: ContextTypes.DEFAULT_TY
         cfg = get_khqrpay_config(conn)
     finally:
         conn.close()
-    if (not cfg["profile_id"] or not cfg["secret_key"]) and not _bakong_fallback_configured():
+    if not _payment_provider_configured(cfg):
         context.user_data["buy_state"] = "prodseller_review"
         await query.edit_message_text(
             "❌ KHQR payment is not configured. Please contact the administrator.",
@@ -2713,7 +2756,7 @@ async def pay_khqr_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
-    if (not cfg["profile_id"] or not cfg["secret_key"]) and not _bakong_fallback_configured():
+    if not _payment_provider_configured(cfg):
         await query.edit_message_text(
             f"{E('error')} Payment gateway not configured.",
             reply_markup=_back_button("menu_product"),
@@ -4098,7 +4141,7 @@ async def _handle_custom_deposit(update: Update, context: ContextTypes.DEFAULT_T
     finally:
         conn.close()
 
-    if (not cfg["profile_id"] or not cfg["secret_key"]) and not _bakong_fallback_configured():
+    if not _payment_provider_configured(cfg):
         await update.message.reply_html(
             "❌ Payment gateway not configured. Contact admin.",
             reply_markup=_back_button("menu_wallet"),

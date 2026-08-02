@@ -42,6 +42,10 @@ KHQRPAY_ABA_URL = os.getenv("KHQRPAY_ABA_URL", "")
 # ---------------------------------------------------------------------------
 # Payment settings
 # ---------------------------------------------------------------------------
+# Active checkout provider. "bakong" uses the direct Bakong KHQR SDK and
+# ignores KHQRPay profile/secret/ABA-link settings.
+_payment_provider = os.getenv("PAYMENT_PROVIDER", "bakong").strip().lower()
+PAYMENT_PROVIDER = "khqrpay" if _payment_provider == "khqrpay" else "bakong"
 QR_EXPIRE_SECONDS = 180      # QR code expires in 3 minutes
 PAYMENT_CHECK_INTERVAL = 5   # Check payment every 5 seconds
 DEPOSIT_AMOUNTS = [1, 5, 10, 20, 50, 100]  # USD amounts for quick deposit
