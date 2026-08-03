@@ -28,7 +28,6 @@ from config import (
     AUTO_BACKUP_MINUTE_UTC,
     NEW_PRODUCT_ALERT_GROUP_ID,
     PRODUCT_ALERT_INTERVAL_SECONDS,
-    PAYMENT_PROVIDER,
 )
 from utils.emoji_manager import (get as E, get_plain as EP, get_premium_id as EID,
                            emoji_for_html, emoji_for_button, emoji_premium_id,
@@ -364,50 +363,9 @@ def _payment_amount_matches(expected, received) -> bool:
         return False
 
 
-def _bakong_fallback_configured() -> bool:
-    """Return whether the legacy Bakong SDK can be used as a QR fallback."""
-    from config import BAKONG_ACCOUNT, BAKONG_API_TOKEN
-
-    return bool(str(BAKONG_ACCOUNT or "").strip() and str(BAKONG_API_TOKEN or "").strip())
-
-
 def _payment_provider_configured(cfg: dict) -> bool:
-    """Check only the credentials for the provider currently in use."""
-    if PAYMENT_PROVIDER == "bakong":
-        return _bakong_fallback_configured()
+    """Check the credentials for the active KHQRPay provider."""
     return bool(cfg.get("profile_id") and cfg.get("secret_key"))
-
-
-async def _create_bakong_checkout_qr(transaction_id: str, amount: float) -> dict:
-    """Create a direct Bakong QR without contacting KHQRPay."""
-    if not _bakong_fallback_configured():
-        return {
-            "success": False,
-            "error": "Bakong payment is not configured. Set BAKONG_ACCOUNT and BAKONG_API_TOKEN.",
-        }
-    try:
-        from services.payment import create_khqr
-
-        result = await create_khqr(amount, transaction_id)
-    except Exception as exc:
-        logger.exception("Direct Bakong QR creation failed")
-        return {"success": False, "error": f"Bakong QR creation failed: {exc}"}
-
-    if not result.get("success") or not result.get("qr_md5"):
-        return {
-            "success": False,
-            "error": str(result.get("error") or "Bakong did not return a payment reference."),
-        }
-    return {
-        "success": True,
-        "qr_image_url": result.get("qr_image"),
-        "qr_text": result.get("qr_text", ""),
-        "md5": result.get("qr_md5", ""),
-        "amount": amount,
-        "transaction_id": transaction_id,
-        "payment_provider": "bakong",
-        "payment_reference": result["qr_md5"],
-    }
 
 
 async def _create_checkout_qr(
@@ -418,15 +376,7 @@ async def _create_checkout_qr(
     remark: str = "",
     success_url: str = "",
 ) -> dict:
-    """Create a checkout QR, falling back to direct Bakong when KHQRPay is unavailable.
-
-    KHQRPay remains the primary provider. A stale/invalid KHQRPay merchant
-    profile returns HTTP 404 before any payment can be created; in that case
-    the already-configured Bakong SDK can still generate and verify a KHQR.
-    """
-    if PAYMENT_PROVIDER == "bakong":
-        return await _create_bakong_checkout_qr(transaction_id, amount)
-
+    """Create an ABA/KHQRPay QR; never fall back to Bakong SDK."""
     has_khqrpay = bool(cfg.get("profile_id") and cfg.get("secret_key"))
     result = {"success": False, "error": "KHQRPay is not configured."}
     if has_khqrpay:
@@ -443,41 +393,7 @@ async def _create_checkout_qr(
             result["payment_reference"] = transaction_id
             return result
 
-    error_text = str(result.get("error") or "")
-    can_fallback = _bakong_fallback_configured() and (
-        not has_khqrpay or "404" in error_text or "profile" in error_text.lower()
-    )
-    if not can_fallback:
-        return result
-
-    logger.warning("KHQRPay QR creation failed; trying direct Bakong fallback: %s", error_text)
-    try:
-        from services.payment import create_khqr
-
-        fallback = await create_khqr(amount, transaction_id)
-    except Exception as exc:
-        logger.exception("Direct Bakong QR fallback failed")
-        fallback = {"success": False, "error": str(exc)}
-
-    if fallback.get("success"):
-        return {
-            "success": True,
-            "qr_image_url": fallback.get("qr_image"),
-            "qr_text": fallback.get("qr_text", ""),
-            "md5": fallback.get("qr_md5", ""),
-            "amount": amount,
-            "transaction_id": transaction_id,
-            "payment_provider": "bakong",
-            "payment_reference": fallback.get("qr_md5", ""),
-        }
-
-    return {
-        "success": False,
-        "error": (
-            f"KHQRPay could not create the merchant QR ({error_text or 'configuration error'}). "
-            f"Bakong fallback also failed: {fallback.get('error', 'unknown error')}"
-        ),
-    }
+    return result
 
 
 async def _verify_checkout_payment(
@@ -487,17 +403,7 @@ async def _verify_checkout_payment(
     payment_provider: str = "khqrpay",
     payment_reference: str | None = None,
 ) -> dict:
-    """Verify either a KHQRPay transaction or a direct Bakong QR MD5."""
-    if payment_provider == "bakong":
-        from services.payment import check_payment
-
-        result = await check_payment(payment_reference or transaction_id)
-        return {
-            "success": True,
-            "paid": bool(result.get("paid")),
-            "amount": result.get("amount"),
-            "currency": "USD",
-        }
+    """Verify the ABA/KHQRPay transaction only."""
     return await verify_aba_payment(cfg["profile_id"], cfg["secret_key"], transaction_id)
 
 
@@ -1024,7 +930,7 @@ async def wallet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
         f"{E('wallet')} <b>My Wallet</b>\n\n"
         f"{E('balance_label')} Balance: <b>${balance:.2f}</b>\n\n"
-        "Tap <b>Deposit</b> to add funds via KHQR (Bakong/ABA/Binance)."
+        "Tap <b>Deposit</b> to add funds via ABA Pay QR."
     )
 
     await query.edit_message_text(
@@ -1033,22 +939,22 @@ async def wallet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ===========================================================================
-# DEPOSIT – Amount Picker (Bakong KHQR only)
+# DEPOSIT – Amount Picker (ABA Pay only)
 # ===========================================================================
 async def deposit_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show deposit amount selection via Bakong KHQR."""
+    """Show deposit amount selection via ABA Pay."""
     query = update.callback_query
     await query.answer()
-    context.user_data["deposit_method"] = "bakong"
+    context.user_data["deposit_method"] = "aba_pay"
     await deposit_amounts(update, context)
 
 
 async def deposit_amounts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show deposit amount selection for Bakong KHQR."""
+    """Show deposit amount selection for ABA Pay."""
     query = update.callback_query
     await query.answer()
 
-    prefix = "depamt_bakong_"
+    prefix = "depamt_aba_"
 
     buttons = []
     row = []
@@ -1068,7 +974,7 @@ async def deposit_amounts(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     text = (
         f"{E('deposit')} <b>Deposit via ABA Pay / KHQR</b>\n\n"
         f"Select an amount to top up:\n"
-        f"📱 ABA Pay · Bakong · Binance\n"
+        f"📱 ABA Pay QR\n"
         f"{E('timer')} Session expires in <b>3 minutes</b>."
     )
 
@@ -1102,7 +1008,7 @@ async def deposit_create_checkout(update: Update, context: ContextTypes.DEFAULT_
     await query.answer()
 
     data = query.data or ""
-    raw = data.replace("depamt_bakong_", "").replace("deposit_amt_", "")
+    raw = data.replace("depamt_aba_", "").replace("depamt_bakong_", "").replace("deposit_amt_", "")
     try:
         amount = float(raw)
     except ValueError:
@@ -1164,7 +1070,7 @@ async def deposit_create_checkout(update: Update, context: ContextTypes.DEFAULT_
     # Send QR image
     caption = (
         f"{E('deposit')} <b>Deposit ${amount:.2f}</b>\n\n"
-        f"📱 Scan with ABA Mobile or Bakong app.\n"
+        f"📱 Scan with ABA Mobile.\n"
         f"{E('timer')} Expires in: <b>03:00</b>"
     )
     msg = await context.bot.send_photo(
@@ -1201,6 +1107,7 @@ async def _khqrpay_watcher(
 
     deadline = time.time() + 180
     last_update = 0
+    last_check_error = None
 
     while time.time() < deadline:
         remaining = int(deadline - time.time())
@@ -1212,7 +1119,7 @@ async def _khqrpay_watcher(
                     chat_id=chat_id, message_id=message_id,
                     caption=(
                         f"{E('deposit')} <b>Deposit ${amount:.2f}</b>\n\n"
-                        f"📱 Scan with ABA Mobile or Bakong app.\n"
+                        f"📱 Scan with ABA Mobile.\n"
                         f"{E('timer')} Expires in: <b>{mins:02d}:{secs:02d}</b>"
                     ),
                     parse_mode="HTML",
@@ -1227,6 +1134,13 @@ async def _khqrpay_watcher(
             payment_provider=payment_provider,
             payment_reference=payment_reference,
         )
+        if not result.get("success"):
+            check_error = str(result.get("error") or "unknown verification error")
+            if check_error != last_check_error:
+                logger.warning("ABA Pay auto-check failed for %s; retrying: %s", transaction_id, check_error)
+                last_check_error = check_error
+        else:
+            last_check_error = None
         if result.get("paid"):
             received_amount = result.get("amount")
             received_currency = str(result.get("currency") or "").upper()
@@ -2072,7 +1986,7 @@ async def prodseller_khqr_start(update: Update, context: ContextTypes.DEFAULT_TY
     caption = (
         f"💳 <b>Pay ${amount:.2f} via KHQR</b>\n\n"
         f"{escape(str(product.get('name') or 'Product'))} × {quantity}\n"
-        "Scan with ABA Mobile or any Bakong app.\n"
+        "Scan with ABA Mobile.\n"
         "⏳ Expires in: <b>03:00</b>\n\n"
         "The order is created only after the exact payment is verified."
     )
@@ -2136,6 +2050,7 @@ async def _prodseller_khqr_watcher(
 
     deadline = time.time() + 180
     last_update = 0
+    last_check_error = None
     while time.time() < deadline:
         remaining = int(deadline - time.time())
         if time.time() - last_update >= 10:
@@ -2161,6 +2076,13 @@ async def _prodseller_khqr_watcher(
             payment_provider=payment_provider,
             payment_reference=payment_reference,
         )
+        if not result.get("success"):
+            check_error = str(result.get("error") or "unknown verification error")
+            if check_error != last_check_error:
+                logger.warning("ABA Pay auto-check failed for %s; retrying: %s", transaction_id, check_error)
+                last_check_error = check_error
+        else:
+            last_check_error = None
         if result.get("paid"):
             received_amount = result.get("amount")
             received_currency = str(result.get("currency") or "").upper()
@@ -2831,7 +2753,7 @@ async def pay_khqr_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         f"{E('buy')} <b>Pay ${total_price:.2f} via ABA Pay</b>\n\n"
         f"{emoji_for_html(prod['emoji'])} <b>{prod['name']}</b> × {qty}\n"
         f"{E('timer')} Expires in: <b>03:00</b>\n\n"
-        f"📱 Scan with ABA Mobile or any Bakong app."
+        f"📱 Scan with ABA Mobile."
     )
     msg = await context.bot.send_photo(
         chat_id=query.message.chat_id,
@@ -2889,6 +2811,7 @@ async def _khqrpay_order_watcher(
 
     deadline = time.time() + 180
     last_update = 0
+    last_check_error = None
 
     while time.time() < deadline:
         remaining = int(deadline - time.time())
@@ -2901,7 +2824,7 @@ async def _khqrpay_order_watcher(
                     caption=(
                         f"{E('buy')} <b>Pay ${amount:.2f} via ABA Pay</b>\n\n"
                         f"{E('timer')} Expires in: <b>{mins:02d}:{secs:02d}</b>\n\n"
-                        f"📱 Scan with ABA Mobile or any Bakong app."
+                        f"📱 Scan with ABA Mobile."
                     ),
                     parse_mode="HTML",
                 )
@@ -2915,6 +2838,13 @@ async def _khqrpay_order_watcher(
             payment_provider=payment_provider,
             payment_reference=payment_reference,
         )
+        if not result.get("success"):
+            check_error = str(result.get("error") or "unknown verification error")
+            if check_error != last_check_error:
+                logger.warning("ABA Pay auto-check failed for %s; retrying: %s", transaction_id, check_error)
+                last_check_error = check_error
+        else:
+            last_check_error = None
         if result.get("paid"):
             received_amount = result.get("amount")
             received_currency = str(result.get("currency") or "").upper()
@@ -3616,7 +3546,7 @@ async def _route_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, da
         await wallet(update, context)
     elif data == "wallet_deposit":
         await deposit_menu(update, context)
-    elif data.startswith("depamt_bakong_") or data.startswith("deposit_amt_"):
+    elif data.startswith(("depamt_aba_", "depamt_bakong_", "deposit_amt_")):
         await deposit_create_checkout(update, context)
     elif data == "deposit_custom":
         await deposit_custom_start(update, context)
@@ -3976,7 +3906,7 @@ async def unified_text_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def _handle_custom_qty(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle quantity input, then show payment options (Wallet / Bakong)."""
+    """Handle quantity input, then show payment options (Wallet / ABA Pay)."""
     if not update.message:
         return
     try:
@@ -4173,7 +4103,7 @@ async def _handle_custom_deposit(update: Update, context: ContextTypes.DEFAULT_T
         photo=result["qr_image_url"],
         caption=(
             f"{E('deposit')} <b>Deposit ${amount:.2f}</b>\n\n"
-            f"📱 Scan with ABA Mobile or any Bakong app.\n"
+            f"📱 Scan with ABA Mobile.\n"
             f"{E('timer')} Expires in: <b>03:00</b>"
         ),
         parse_mode="HTML",

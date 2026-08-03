@@ -1,7 +1,7 @@
 """
 KHQRPay Payment Gateway — ABA Pay / KHQRcc (khqr.cc)
 
-Direct QR API (server-to-server) + Verify V2 with Bakong fallback.
+Direct QR API (server-to-server) + Verify V2 for ABA Pay.
 - create_aba_qr() → POST to payments/qr-api-khqr → returns QR image URL + md5
 - verify_aba_payment() → POST to check-transv2-khqrcc → returns paid status
 """
@@ -28,6 +28,22 @@ def _sha1(*parts: str) -> str:
 def _is_success_code(value) -> bool:
     """Accept numeric and string success codes returned by gateway versions."""
     return str(value).strip().lower() in {"0", "00", "success", "ok"}
+
+
+def _transaction_is_paid(tx_data: dict) -> bool:
+    """Accept the paid markers used by KHQRPay and ABA PayWay responses."""
+    if tx_data.get("paid") is True or tx_data.get("is_paid") is True:
+        return True
+
+    status_values = (
+        tx_data.get("status"),
+        tx_data.get("transaction_status"),
+        tx_data.get("payment_status"),
+        tx_data.get("payment_status_code"),
+        tx_data.get("response_code"),
+    )
+    paid_values = {"0", "00", "success", "successful", "paid", "completed", "approved"}
+    return any(str(value).strip().lower() in paid_values for value in status_values if value is not None)
 
 
 def _api_url(profile_id: str, endpoint: str) -> str:
@@ -70,9 +86,7 @@ async def create_aba_qr(
         "hash": hash_val,
     }
 
-    # KHQRPay's current homepage uses `purchase` for QR creation. The
-    # dedicated API page documents `qr-api-khqr`; use the current homepage
-    # endpoint here because it is the live route for newer merchant profiles.
+    # KHQRPay documents `purchase` as the current QR creation endpoint.
     url = _api_url(profile_id, "purchase")
     logger.info(f"KHQRPay QR API → {url} | txn={transaction_id} | amt={amount_str}")
 
@@ -145,7 +159,7 @@ async def verify_aba_payment(
     transaction_id: str,
 ) -> dict:
     """
-    Verify ABA Pay payment via Check Transaction V2 (fast + Bakong fallback).
+    Verify ABA Pay payment via Check Transaction V2.
 
     Returns:
         {"success": True, "paid": True/False, "amount": "..."}
@@ -164,10 +178,33 @@ async def verify_aba_payment(
         async with aiohttp.ClientSession() as session:
             async with session.post(url, data=payload, timeout=30) as resp:
                 raw = await resp.text()
+                if resp.status >= 400:
+                    logger.warning(
+                        "KHQRPay verify HTTP %s for txn=%s: %s",
+                        resp.status,
+                        transaction_id,
+                        raw[:300],
+                    )
+                    return {
+                        "success": False,
+                        "paid": False,
+                        "error": f"KHQRPay verification HTTP {resp.status}",
+                        "http_status": resp.status,
+                    }
                 try:
                     data = json.loads(raw)
                 except Exception:
-                    return {"success": True, "paid": False}
+                    logger.warning(
+                        "KHQRPay verify returned invalid JSON for txn=%s: %s",
+                        transaction_id,
+                        raw[:300],
+                    )
+                    return {
+                        "success": False,
+                        "paid": False,
+                        "error": "Invalid KHQRPay verification response",
+                        "http_status": resp.status,
+                    }
 
                 if _is_success_code(data.get("responseCode")) and data.get("data"):
                     tx_data = data["data"]
@@ -175,13 +212,25 @@ async def verify_aba_payment(
                         tx_data.get("status")
                         or tx_data.get("transaction_status")
                         or tx_data.get("payment_status")
+                        or tx_data.get("payment_status_code")
                         or ""
                     ).strip().lower()
                     return {
                         "success": True,
-                        "paid": status in {"success", "successful", "paid", "completed", "approved", "00"},
-                        "amount": tx_data.get("amount", tx_data.get("paid_amount", "")),
-                        "currency": tx_data.get("currency", ""),
+                        "paid": _transaction_is_paid(tx_data),
+                        "amount": (
+                            tx_data.get("amount")
+                            or tx_data.get("paid_amount")
+                            or tx_data.get("payment_amount")
+                            or tx_data.get("original_amount")
+                            or ""
+                        ),
+                        "currency": (
+                            tx_data.get("currency")
+                            or tx_data.get("payment_currency")
+                            or tx_data.get("original_currency")
+                            or ""
+                        ),
                         "status": status,
                     }
 
@@ -190,7 +239,12 @@ async def verify_aba_payment(
                     f"KHQRPay verify failed: code={data.get('responseCode')} "
                     f"msg={data.get('responseMessage', '?')} txn={transaction_id}"
                 )
-                return {"success": True, "paid": False}
+                return {
+                    "success": True,
+                    "paid": False,
+                    "status": "pending",
+                    "gateway_code": data.get("responseCode"),
+                }
 
     except Exception as e:
         logger.error(f"KHQRPay Verify V2 error: {e}")
