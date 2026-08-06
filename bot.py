@@ -19,6 +19,7 @@ from telegram.ext import (
 from config import (
     BOT_TOKEN,
     DEPOSIT_AMOUNTS,
+    MAX_CUSTOM_DEPOSIT_AMOUNT,
     ADMIN_ID,
     SUPPORT_USERNAME,
     WEBHOOK_URL,
@@ -37,6 +38,8 @@ from services.database import (
     get_or_create_user,
     get_order_count,
     create_payment,
+    get_payment,
+    credit_payment_once,
     get_product,
     get_stock_for_product,
     claim_stock_items,
@@ -363,6 +366,51 @@ def _payment_amount_matches(expected, received) -> bool:
         return False
 
 
+def _parse_money_amount(value, *, max_amount=None):
+    """Parse a positive USD amount at cent precision, rejecting NaN/infinity."""
+    try:
+        raw = Decimal(str(value).strip())
+        parsed = raw.quantize(Decimal("0.01"))
+    except (InvalidOperation, ValueError, TypeError, AttributeError):
+        return None
+    if not raw.is_finite() or raw != parsed or parsed < Decimal("0.01"):
+        return None
+    if max_amount is not None:
+        try:
+            maximum = Decimal(str(max_amount)).quantize(Decimal("0.01"))
+        except (InvalidOperation, ValueError, TypeError):
+            return None
+        if not maximum.is_finite() or parsed > maximum:
+            return None
+    return float(parsed)
+
+
+def _new_transaction_id(prefix: str) -> str:
+    """Create a high-entropy gateway ID that is unique across bot workers."""
+    # 96 bits of randomness keeps the ID below common gateway length limits.
+    return f"{prefix}-{uuid.uuid4().hex[:24].upper()}"
+
+
+def _payment_record_matches(record, payment_id, user_id, amount, transaction_id) -> bool:
+    """Bind a gateway result to the exact pending row created for this user."""
+    if not record:
+        return False
+    try:
+        return (
+            int(record.get("id")) == int(payment_id)
+            and int(record.get("user_id")) == int(user_id)
+            and str(record.get("status") or "").lower() == "pending"
+            and str(record.get("qr_md5") or "").strip() == str(transaction_id).strip()
+            and _payment_amount_matches(amount, record.get("amount"))
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def _payment_currency_matches(value) -> bool:
+    return str(value or "").strip().upper() in {"USD", "US DOLLAR"}
+
+
 def _payment_provider_configured(cfg: dict) -> bool:
     """Check the credentials for the active KHQRPay provider."""
     return bool(cfg.get("profile_id") and cfg.get("secret_key"))
@@ -377,6 +425,10 @@ async def _create_checkout_qr(
     success_url: str = "",
 ) -> dict:
     """Create an ABA/KHQRPay QR; never fall back to Bakong SDK."""
+    normalized_amount = _parse_money_amount(amount)
+    if normalized_amount is None:
+        return {"success": False, "error": "Invalid payment amount."}
+    amount = normalized_amount
     has_khqrpay = bool(cfg.get("profile_id") and cfg.get("secret_key"))
     result = {"success": False, "error": "KHQRPay is not configured."}
     if has_khqrpay:
@@ -1019,14 +1071,13 @@ async def deposit_create_checkout(update: Update, context: ContextTypes.DEFAULT_
 
     data = query.data or ""
     raw = data.replace("depamt_aba_", "").replace("depamt_bakong_", "").replace("deposit_amt_", "")
-    try:
-        amount = float(raw)
-    except ValueError:
-        await query.edit_message_text("❌ Invalid amount.", reply_markup=_back_button("menu_wallet"))
+    amount = _parse_money_amount(raw)
+    if amount is None:
+        await query.edit_message_text("Invalid amount.", reply_markup=_back_button("menu_wallet"))
         return
 
     user = query.from_user
-    transaction_id = f"RAT-{uuid.uuid4().hex[:8].upper()}"
+    transaction_id = _new_transaction_id("RAT")
 
     conn = get_db()
     try:
@@ -1113,8 +1164,17 @@ async def _khqrpay_watcher(
     payment_reference: str | None = None,
 ) -> None:
     """Poll ABA Pay for confirmation, then credit balance."""
-    from services.database import mark_payment_paid, add_balance, get_db
+    from services.database import credit_payment_once, get_payment, get_db
     import time
+
+    binding_conn = get_db()
+    try:
+        payment = get_payment(binding_conn, payment_id)
+    finally:
+        binding_conn.close()
+    if not _payment_record_matches(payment, payment_id, user_id, amount, transaction_id):
+        logger.error("Payment binding validation failed for deposit %s", payment_id)
+        return
 
     deadline = time.time() + 180
     last_update = 0
@@ -1157,7 +1217,7 @@ async def _khqrpay_watcher(
             received_currency = str(result.get("currency") or "").upper()
             if (
                 not _payment_amount_matches(amount, received_amount)
-                or (received_currency and received_currency not in {"USD", "US DOLLAR"})
+                or not _payment_currency_matches(received_currency)
             ):
                 review_conn = get_db()
                 try:
@@ -1185,11 +1245,26 @@ async def _khqrpay_watcher(
             conn = get_db()
             try:
                 # Only the first successful pending→paid transition credits balance
-                if not mark_payment_paid(conn, payment_id):
-                    return
-                new_balance = add_balance(conn, user_id, amount)
+                credited, new_balance = credit_payment_once(
+                    conn, payment_id, user_id, amount, final_status="credited"
+                )
+            except Exception:
+                logger.exception("Atomic wallet credit failed for payment %s", payment_id)
+                try:
+                    from services.database import mark_payment_review
+                    mark_payment_review(conn, payment_id)
+                except Exception:
+                    logger.exception("Could not hold payment %s for manual review", payment_id)
+                await _notify_payment_review(
+                    context, user_id, payment_id, amount, amount,
+                    "Payment was confirmed, but the atomic wallet credit transaction was unavailable."
+                )
+                return
             finally:
                 conn.close()
+
+            if not credited:
+                return
 
             # Delete QR photo, send clean success message
             try:
@@ -1960,7 +2035,7 @@ async def prodseller_khqr_start(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     amount = round(unit_price * quantity, 2)
-    transaction_id = f"PS-{uuid.uuid4().hex[:16].upper()}"
+    transaction_id = _new_transaction_id("PS")
     await query.edit_message_text("⏳ <b>Generating KHQR payment...</b>", parse_mode="HTML")
     result = await _create_checkout_qr(
         cfg,
@@ -2060,6 +2135,15 @@ async def _prodseller_khqr_watcher(
     """Verify exact payment, then order from the product service and deliver the keys."""
     import time
 
+    binding_conn = get_db()
+    try:
+        payment = get_payment(binding_conn, payment_id)
+    finally:
+        binding_conn.close()
+    if not _payment_record_matches(payment, payment_id, user_id, amount, transaction_id):
+        logger.error("Payment binding validation failed for supplier payment %s", payment_id)
+        return
+
     deadline = time.time() + 180
     last_update = 0
     last_check_error = None
@@ -2100,7 +2184,7 @@ async def _prodseller_khqr_watcher(
             received_currency = str(result.get("currency") or "").upper()
             if (
                 not _payment_amount_matches(amount, received_amount)
-                or (received_currency and received_currency not in {"USD", "US DOLLAR"})
+                or not _payment_currency_matches(received_currency)
             ):
                 conn = get_db()
                 try:
@@ -2149,14 +2233,15 @@ async def _prodseller_khqr_watcher(
                 credit_conn = get_db()
                 try:
                     from services.database import (
-                        add_balance,
-                        mark_payment_wallet_credited,
-                        mark_payment_wallet_credit_pending,
+                        credit_payment_once,
                     )
-                    if mark_payment_wallet_credit_pending(credit_conn, payment_id):
-                        new_balance = add_balance(credit_conn, user_id, amount)
-                        mark_payment_wallet_credited(credit_conn, payment_id)
-                        credited = True
+                    credited, new_balance = credit_payment_once(
+                        credit_conn,
+                        payment_id,
+                        user_id,
+                        amount,
+                        final_status="wallet_credited",
+                    )
                 except Exception:
                     logger.exception("Supplier failure compensation failed for payment %s", payment_id)
                 finally:
@@ -2724,7 +2809,7 @@ async def pay_khqr_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 promo_data = None; discount = 0; unit_price = price
 
     total_price = unit_price * qty
-    transaction_id = f"ORD-{uuid.uuid4().hex[:8].upper()}"
+    transaction_id = _new_transaction_id("ORD")
 
     await query.edit_message_text(
         f"{E('timer')} <b>Generating ABA Pay QR…</b>",
@@ -2814,13 +2899,20 @@ async def _khqrpay_order_watcher(
     """Poll ABA Pay for order payment; on success, assign stock and deliver."""
     import time
     from services.database import (
-        add_balance,
+        credit_payment_once,
         delete_order,
-        mark_payment_expired,
+        get_payment,
         mark_payment_paid,
-        mark_payment_wallet_credited,
-        mark_payment_wallet_credit_pending,
     )
+
+    binding_conn = get_db()
+    try:
+        payment = get_payment(binding_conn, payment_id)
+    finally:
+        binding_conn.close()
+    if not _payment_record_matches(payment, payment_id, user_id, amount, transaction_id):
+        logger.error("Payment binding validation failed for local order payment %s", payment_id)
+        return
 
     deadline = time.time() + 180
     last_update = 0
@@ -2863,7 +2955,7 @@ async def _khqrpay_order_watcher(
             received_currency = str(result.get("currency") or "").upper()
             if (
                 not _payment_amount_matches(amount, received_amount)
-                or (received_currency and received_currency not in {"USD", "US DOLLAR"})
+                or not _payment_currency_matches(received_currency)
             ):
                 review_conn = get_db()
                 try:
@@ -2904,10 +2996,14 @@ async def _khqrpay_order_watcher(
                 if not is_unlimited:
                     claimed = claim_stock_items(conn, prod_id, qty)
                     if len(claimed) < qty:
-                        if mark_payment_wallet_credit_pending(conn, payment_id):
-                            new_balance = add_balance(conn, user_id, amount)
-                            mark_payment_wallet_credited(conn, payment_id)
-                        else:
+                        credited, new_balance = credit_payment_once(
+                            conn,
+                            payment_id,
+                            user_id,
+                            amount,
+                            final_status="wallet_credited",
+                        )
+                        if not credited:
                             new_balance = None
                         try:
                             await context.bot.edit_message_caption(
@@ -2961,10 +3057,13 @@ async def _khqrpay_order_watcher(
                         pass
                 compensated = False
                 try:
-                    if mark_payment_wallet_credit_pending(conn, payment_id):
-                        add_balance(conn, user_id, amount)
-                        mark_payment_wallet_credited(conn, payment_id)
-                        compensated = True
+                    compensated, _ = credit_payment_once(
+                        conn,
+                        payment_id,
+                        user_id,
+                        amount,
+                        final_status="wallet_credited",
+                    )
                 except Exception:
                     logger.exception("Paid order rollback compensation failed for payment %s", payment_id)
                 try:
@@ -4065,12 +4164,14 @@ async def _handle_custom_deposit(update: Update, context: ContextTypes.DEFAULT_T
     """Handle custom deposit amount via KHQRPay checkout."""
     if not update.message:
         return
-    try:
-        amount = float(update.message.text.strip())
-        if amount < 0.01:
-            raise ValueError
-    except ValueError:
-        await update.message.reply_html("❌ Enter a valid amount (e.g. 3.50).")
+    amount = _parse_money_amount(
+        update.message.text,
+        max_amount=MAX_CUSTOM_DEPOSIT_AMOUNT,
+    )
+    if amount is None:
+        await update.message.reply_html(
+            f"Enter a valid amount from $0.01 to ${MAX_CUSTOM_DEPOSIT_AMOUNT:.2f}."
+        )
         return
 
     context.user_data.pop("buy_state", None)
@@ -4091,7 +4192,7 @@ async def _handle_custom_deposit(update: Update, context: ContextTypes.DEFAULT_T
         )
         return
 
-    transaction_id = f"RAT-{uuid.uuid4().hex[:8].upper()}"
+    transaction_id = _new_transaction_id("RAT")
     result = await _create_checkout_qr(
         cfg,
         transaction_id,

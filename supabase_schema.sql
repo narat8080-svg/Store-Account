@@ -81,6 +81,90 @@ CREATE TABLE IF NOT EXISTS payments (
     paid_at     TIMESTAMPTZ
 );
 
+-- Payment credit ledger. A payment ID can create at most one wallet credit,
+-- even if multiple bot workers poll the same gateway transaction.
+ALTER TABLE payments ADD COLUMN IF NOT EXISTS credited_at TIMESTAMPTZ;
+
+CREATE TABLE IF NOT EXISTS payment_credits (
+    payment_id  BIGINT PRIMARY KEY REFERENCES payments(id) ON DELETE CASCADE,
+    user_id     BIGINT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    amount      NUMERIC(18,2) NOT NULL CHECK (amount > 0),
+    created_at  TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE OR REPLACE FUNCTION credit_payment_once(
+    p_payment_id BIGINT,
+    p_user_id BIGINT,
+    p_amount NUMERIC,
+    p_final_status TEXT DEFAULT 'credited'
+)
+RETURNS TABLE(credited BOOLEAN, new_balance NUMERIC)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+    v_payment_user BIGINT;
+    v_payment_amount NUMERIC;
+    v_balance NUMERIC;
+    v_inserted INTEGER;
+BEGIN
+    IF p_final_status NOT IN ('credited', 'wallet_credited') THEN
+        RAISE EXCEPTION 'Invalid payment credit status';
+    END IF;
+    IF p_amount IS NULL OR p_amount = 'NaN'::NUMERIC OR p_amount <= 0 THEN
+        RAISE EXCEPTION 'Invalid payment credit amount';
+    END IF;
+
+    -- Lock the payment row while validating the user and exact cents value.
+    SELECT user_id, ROUND(amount::NUMERIC, 2)
+      INTO v_payment_user, v_payment_amount
+      FROM payments
+     WHERE id = p_payment_id
+       AND status IN ('pending', 'paid')
+     FOR UPDATE;
+
+    IF NOT FOUND
+       OR v_payment_user <> p_user_id
+       OR v_payment_amount <> ROUND(p_amount, 2) THEN
+        RETURN QUERY SELECT FALSE, NULL::NUMERIC;
+        RETURN;
+    END IF;
+
+    INSERT INTO payment_credits(payment_id, user_id, amount)
+    VALUES (p_payment_id, p_user_id, v_payment_amount)
+    ON CONFLICT (payment_id) DO NOTHING;
+    GET DIAGNOSTICS v_inserted = ROW_COUNT;
+
+    IF v_inserted = 0 THEN
+        SELECT balance::NUMERIC INTO v_balance
+          FROM users WHERE user_id = p_user_id;
+        RETURN QUERY SELECT FALSE, v_balance;
+        RETURN;
+    END IF;
+
+    UPDATE users
+       SET balance = COALESCE(balance::NUMERIC, 0) + v_payment_amount
+     WHERE user_id = p_user_id
+     RETURNING balance::NUMERIC INTO v_balance;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'User % does not exist', p_user_id;
+    END IF;
+
+    UPDATE payments
+       SET status = p_final_status,
+           paid_at = COALESCE(paid_at, NOW()),
+           credited_at = NOW()
+     WHERE id = p_payment_id;
+
+    RETURN QUERY SELECT TRUE, v_balance;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION credit_payment_once(BIGINT, BIGINT, NUMERIC, TEXT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION credit_payment_once(BIGINT, BIGINT, NUMERIC, TEXT) TO service_role;
+
 -- Promo codes table
 CREATE TABLE IF NOT EXISTS promo_codes (
     id              BIGSERIAL PRIMARY KEY,

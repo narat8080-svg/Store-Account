@@ -47,6 +47,9 @@ PAYMENT_PROVIDER = "khqrpay"
 QR_EXPIRE_SECONDS = 180      # QR code expires in 3 minutes
 PAYMENT_CHECK_INTERVAL = 5   # Check payment every 5 seconds
 DEPOSIT_AMOUNTS = [1, 5, 10, 20, 50, 100]  # USD amounts for quick deposit
+# Safety ceiling for user-entered wallet deposits. Product prices are validated
+# by their own catalog rules and are not limited by this setting.
+MAX_CUSTOM_DEPOSIT_AMOUNT = float(os.getenv("MAX_CUSTOM_DEPOSIT_AMOUNT", "1000"))
 
 # ---------------------------------------------------------------------------
 # Notification Groups

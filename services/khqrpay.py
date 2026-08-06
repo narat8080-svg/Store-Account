@@ -1,10 +1,11 @@
 """KHQRPay managed ABA/KHQR checkout and transaction verification."""
 
 import asyncio
+import base64
 import hashlib
 import json
 import logging
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode, urlsplit
 
 import aiohttp
 
@@ -30,8 +31,6 @@ def _transaction_is_paid(tx_data: dict) -> bool:
         tx_data.get("status"),
         tx_data.get("transaction_status"),
         tx_data.get("payment_status"),
-        tx_data.get("payment_status_code"),
-        tx_data.get("response_code"),
     )
     return any(
         str(value).strip().lower()
@@ -47,6 +46,9 @@ def _base_url() -> str:
         if base.lower().endswith(suffix):
             base = base[: -len(suffix)].rstrip("/")
             break
+    parsed = urlsplit(base)
+    if parsed.scheme != "https" or parsed.hostname not in {"khqr.cc", "www.khqr.cc"}:
+        raise ValueError("KHQRPay base URL must be https://khqr.cc")
     return base
 
 
@@ -89,6 +91,69 @@ def _render_checkout_qr(checkout_url: str):
     return buffer
 
 
+def _decode_urlsafe(value: str) -> str:
+    padded = value.replace("-", "+").replace("_", "/")
+    padded += "=" * (-len(padded) % 4)
+    return base64.b64decode(padded).decode("utf-8")
+
+
+def _decrypt_qr_token(token: str, profile_id: str) -> dict:
+    """Decrypt the QR-data token used by the public KHQRPay checkout page."""
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    parts = str(token or "").split(":")
+    if len(parts) != 3:
+        raise ValueError("KHQRPay returned an invalid QR-data token")
+    iv = bytes.fromhex(parts[0])
+    auth_tag = bytes.fromhex(parts[1])
+    ciphertext = bytes.fromhex(parts[2]) + auth_tag
+    key = hashlib.sha256(str(profile_id).encode("utf-8")).digest()
+    plaintext = AESGCM(key).decrypt(iv, ciphertext, None)
+    return json.loads(plaintext.decode("utf-8"))
+
+
+async def _fetch_bank_qr(session, checkout_url: str, profile_id: str) -> dict:
+    """Resolve managed checkout and retrieve its real bank QR payload."""
+    async with session.get(checkout_url, allow_redirects=True, timeout=30) as response:
+        raw = await response.text()
+        if response.status >= 400:
+            return {"success": False, "error": f"KHQRPay checkout returned HTTP {response.status}"}
+        resolved = str(response.url)
+
+    path_parts = urlsplit(resolved).path.strip("/").split("/")
+    if len(path_parts) < 4 or path_parts[0] != "payment" or path_parts[1] != "khqrcc":
+        return {"success": False, "error": "KHQRPay returned an invalid managed checkout URL"}
+
+    resolved_profile = _decode_urlsafe(path_parts[2])
+    payload = "/".join(path_parts[3:])
+    qr_data_url = (
+        f"{_base_url()}/api/payment/qr-data/{quote(resolved_profile, safe='')}?"
+        f"{urlencode({'payload': payload})}"
+    )
+    async with session.get(qr_data_url, timeout=30) as qr_response:
+        qr_raw_response = await qr_response.text()
+        if qr_response.status >= 400:
+            return {
+                "success": False,
+                "error": f"KHQRPay QR-data returned HTTP {qr_response.status}",
+            }
+        try:
+            qr_data = json.loads(qr_raw_response)
+        except Exception:
+            return {"success": False, "error": "KHQRPay returned invalid QR-data JSON"}
+
+    try:
+        details = _decrypt_qr_token(qr_data.get("token"), resolved_profile)
+    except Exception as exc:
+        logger.exception("Could not decrypt KHQRPay QR-data token")
+        return {"success": False, "error": f"Could not decode KHQRPay QR data: {exc}"}
+
+    qr_text = str(details.get("qr_raw") or details.get("qr_text") or "").strip()
+    if not qr_text:
+        return {"success": False, "error": "KHQRPay returned no bank QR payload"}
+    return {"success": True, "qr_text": qr_text, "details": details, "raw": raw}
+
+
 async def create_aba_qr(
     profile_id: str,
     secret_key: str,
@@ -110,48 +175,15 @@ async def create_aba_qr(
 
     try:
         async with aiohttp.ClientSession() as session:
-            # Probe the managed route before sending the QR. A redirect is
-            # expected; a 404 means the merchant profile is not active.
-            async with session.get(
-                checkout_url,
-                allow_redirects=False,
-                timeout=30,
-            ) as response:
-                raw = await response.text()
-                logger.info(
-                    "KHQRPay managed checkout probe HTTP %s | txn=%s",
-                    response.status,
-                    transaction_id,
-                )
-                if response.status >= 400:
-                    if response.status == 404:
-                        return {
-                            "success": False,
-                            "error": (
-                                "KHQRPay returned HTTP 404 for the managed checkout. "
-                                "Use an active Profile ID from the KHQRPay dashboard and "
-                                "confirm ABA/KHQR checkout access is enabled."
-                            ),
-                            "http_status": response.status,
-                        }
-                    return {
-                        "success": False,
-                        "error": f"KHQRPay checkout returned HTTP {response.status}",
-                        "http_status": response.status,
-                    }
-
-                body = raw.lower()
-                if "profile not found" in body or "invalid profile" in body:
-                    return {
-                        "success": False,
-                        "error": "KHQRPay rejected the configured merchant profile.",
-                        "http_status": response.status,
-                    }
+            bank_qr = await _fetch_bank_qr(session, checkout_url, profile_id)
+        if not bank_qr.get("success"):
+            return bank_qr
+        qr_text = bank_qr["qr_text"]
 
         return {
             "success": True,
-            "qr_image_url": _render_checkout_qr(checkout_url),
-            "qr_text": checkout_url,
+            "qr_image_url": _render_checkout_qr(qr_text),
+            "qr_text": qr_text,
             "checkout_url": checkout_url,
             "md5": "",
             "amount": amount_str,
@@ -233,6 +265,13 @@ async def verify_aba_payment(
 
                 if _is_success_code(data.get("responseCode")) and data.get("data"):
                     tx_data = data["data"]
+                    returned_transaction_id = str(tx_data.get("transaction_id") or "").strip()
+                    if returned_transaction_id != str(transaction_id).strip():
+                        return {
+                            "success": False,
+                            "paid": False,
+                            "error": "KHQRPay returned a mismatched transaction ID",
+                        }
                     status = str(tx_data.get("status") or "").strip().lower()
                     return {
                         "success": True,

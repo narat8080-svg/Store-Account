@@ -116,6 +116,49 @@ def create_payment(conn, user_id, amount, qr_text='', qr_md5=''):
                 pass
         raise
 
+
+def get_payment(conn, payment_id):
+    """Return the immutable payment binding used by a payment watcher."""
+    r = (
+        _get_supabase()
+        .table('payments')
+        .select('id,user_id,amount,qr_md5,status,created_at,paid_at')
+        .eq('id', payment_id)
+        .limit(1)
+        .execute()
+    )
+    return dict(r.data[0]) if r.data else None
+
+
+def credit_payment_once(conn, payment_id, user_id, amount, final_status='credited'):
+    """Credit one confirmed payment exactly once through the database ledger.
+
+    This deliberately has no unsafe Python fallback. Production must have the
+    `credit_payment_once` SQL function installed before confirmed deposits can
+    be credited.
+    """
+    if final_status not in {'credited', 'wallet_credited'}:
+        raise ValueError('Invalid payment credit status')
+
+    r = _get_supabase().rpc(
+        'credit_payment_once',
+        {
+            'p_payment_id': int(payment_id),
+            'p_user_id': int(user_id),
+            'p_amount': str(amount),
+            'p_final_status': final_status,
+        },
+    ).execute()
+    data = r.data
+    row = data[0] if isinstance(data, list) and data else data if isinstance(data, dict) else None
+    if not row or 'credited' not in row:
+        raise RuntimeError(
+            'Atomic payment credit RPC is unavailable or returned an invalid response. '
+            'Run the latest supabase_schema.sql migration.'
+        )
+    new_balance = row.get('new_balance')
+    return bool(row.get('credited')), (float(new_balance) if new_balance is not None else None)
+
 def mark_payment_paid(conn, payment_id):
     """
     Mark payment as paid only if still pending.
