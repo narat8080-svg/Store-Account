@@ -396,6 +396,16 @@ async def _create_checkout_qr(
     return result
 
 
+def _checkout_qr_markup(result: dict):
+    """Add a direct checkout button alongside the scannable QR image."""
+    checkout_url = result.get("checkout_url")
+    if not checkout_url:
+        return None
+    return InlineKeyboardMarkup([[
+        _make_url_button("Open ABA Checkout", checkout_url, "payment"),
+    ]])
+
+
 async def _verify_checkout_payment(
     cfg: dict,
     transaction_id: str,
@@ -1040,7 +1050,7 @@ async def deposit_create_checkout(update: Update, context: ContextTypes.DEFAULT_
         cfg,
         transaction_id,
         amount,
-        success_url=cfg["aba_url"] or "https://t.me/storeaccount_bot",
+        success_url="https://t.me/storeaccount_bot",
         remark=f"Deposit for {user.id}",
     )
 
@@ -1070,7 +1080,7 @@ async def deposit_create_checkout(update: Update, context: ContextTypes.DEFAULT_
     # Send QR image
     caption = (
         f"{E('deposit')} <b>Deposit ${amount:.2f}</b>\n\n"
-        f"📱 Scan with ABA Mobile.\n"
+        f"📱 Open the checkout QR, then pay with ABA Mobile.\n"
         f"{E('timer')} Expires in: <b>03:00</b>"
     )
     msg = await context.bot.send_photo(
@@ -1078,6 +1088,7 @@ async def deposit_create_checkout(update: Update, context: ContextTypes.DEFAULT_
         photo=result["qr_image_url"],
         caption=caption,
         parse_mode="HTML",
+        reply_markup=_checkout_qr_markup(result),
     )
 
     try:
@@ -1119,7 +1130,7 @@ async def _khqrpay_watcher(
                     chat_id=chat_id, message_id=message_id,
                     caption=(
                         f"{E('deposit')} <b>Deposit ${amount:.2f}</b>\n\n"
-                        f"📱 Scan with ABA Mobile.\n"
+                        f"📱 Open the checkout QR, then pay with ABA Mobile.\n"
                         f"{E('timer')} Expires in: <b>{mins:02d}:{secs:02d}</b>"
                     ),
                     parse_mode="HTML",
@@ -1955,7 +1966,7 @@ async def prodseller_khqr_start(update: Update, context: ContextTypes.DEFAULT_TY
         cfg,
         transaction_id,
         amount,
-        success_url=cfg["aba_url"] or "https://t.me/storeaccount_bot",
+        success_url="https://t.me/storeaccount_bot",
         remark=f"Store: {product.get('name', 'Product')} x{quantity}",
     )
     if not result.get("success"):
@@ -1986,7 +1997,7 @@ async def prodseller_khqr_start(update: Update, context: ContextTypes.DEFAULT_TY
     caption = (
         f"💳 <b>Pay ${amount:.2f} via KHQR</b>\n\n"
         f"{escape(str(product.get('name') or 'Product'))} × {quantity}\n"
-        "Scan with ABA Mobile.\n"
+        "Open the checkout QR, then pay with ABA Mobile.\n"
         "⏳ Expires in: <b>03:00</b>\n\n"
         "The order is created only after the exact payment is verified."
     )
@@ -1996,6 +2007,7 @@ async def prodseller_khqr_start(update: Update, context: ContextTypes.DEFAULT_TY
             photo=result.get("qr_image_url") or result.get("qr_text"),
             caption=caption,
             parse_mode="HTML",
+            reply_markup=_checkout_qr_markup(result),
         )
     except Exception:
         context.user_data["buy_state"] = "prodseller_review"
@@ -2723,7 +2735,7 @@ async def pay_khqr_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         cfg,
         transaction_id,
         total_price,
-        success_url=cfg["aba_url"] or "https://t.me/storeaccount_bot",
+        success_url="https://t.me/storeaccount_bot",
         remark=f"Order: {prod['name']} x{qty}",
     )
 
@@ -2753,13 +2765,14 @@ async def pay_khqr_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         f"{E('buy')} <b>Pay ${total_price:.2f} via ABA Pay</b>\n\n"
         f"{emoji_for_html(prod['emoji'])} <b>{prod['name']}</b> × {qty}\n"
         f"{E('timer')} Expires in: <b>03:00</b>\n\n"
-        f"📱 Scan with ABA Mobile."
+        f"📱 Open the checkout QR, then pay with ABA Mobile."
     )
     msg = await context.bot.send_photo(
         chat_id=query.message.chat_id,
         photo=result["qr_image_url"],
         caption=caption,
         parse_mode="HTML",
+        reply_markup=_checkout_qr_markup(result),
     )
 
     asyncio.create_task(_khqrpay_order_watcher(
@@ -2824,7 +2837,7 @@ async def _khqrpay_order_watcher(
                     caption=(
                         f"{E('buy')} <b>Pay ${amount:.2f} via ABA Pay</b>\n\n"
                         f"{E('timer')} Expires in: <b>{mins:02d}:{secs:02d}</b>\n\n"
-                        f"📱 Scan with ABA Mobile."
+                        f"📱 Open the checkout QR, then pay with ABA Mobile."
                     ),
                     parse_mode="HTML",
                 )
@@ -4103,10 +4116,11 @@ async def _handle_custom_deposit(update: Update, context: ContextTypes.DEFAULT_T
         photo=result["qr_image_url"],
         caption=(
             f"{E('deposit')} <b>Deposit ${amount:.2f}</b>\n\n"
-            f"📱 Scan with ABA Mobile.\n"
+            f"📱 Open the checkout QR, then pay with ABA Mobile.\n"
             f"{E('timer')} Expires in: <b>03:00</b>"
         ),
         parse_mode="HTML",
+        reply_markup=_checkout_qr_markup(result),
     )
 
     asyncio.create_task(_khqrpay_watcher(

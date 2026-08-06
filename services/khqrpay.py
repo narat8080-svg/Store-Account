@@ -1,62 +1,92 @@
-"""
-KHQRPay Payment Gateway — ABA Pay / KHQRcc (khqr.cc)
+"""KHQRPay managed ABA/KHQR checkout and transaction verification."""
 
-Direct QR API (server-to-server) + Verify V2 for ABA Pay.
-- create_aba_qr() → POST to payments/qr-api-khqr → returns QR image URL + md5
-- verify_aba_payment() → POST to check-transv2-khqrcc → returns paid status
-"""
 import asyncio
 import hashlib
 import json
 import logging
+from urllib.parse import urlencode
 
 import aiohttp
 
-logger = logging.getLogger(__name__)
-
 from config import KHQRPAY_BASE_URL
 
-# Current KHQRPay docs use https://khqr.cc/{profile}/... (without /api).
-# KHQRPAY_BASE_URL remains configurable for accounts still using a legacy path.
+logger = logging.getLogger(__name__)
 KHQRPAY_BASE = KHQRPAY_BASE_URL
 
 
 def _sha1(*parts: str) -> str:
-    return hashlib.sha1("".join(parts).encode("utf-8")).hexdigest()
+    return hashlib.sha1("".join(str(part) for part in parts).encode("utf-8")).hexdigest()
 
 
 def _is_success_code(value) -> bool:
-    """Accept numeric and string success codes returned by gateway versions."""
     return str(value).strip().lower() in {"0", "00", "success", "ok"}
 
 
 def _transaction_is_paid(tx_data: dict) -> bool:
-    """Accept the paid markers used by KHQRPay and ABA PayWay responses."""
+    """Accept paid markers used by KHQRPay and ABA responses."""
     if tx_data.get("paid") is True or tx_data.get("is_paid") is True:
         return True
-
-    status_values = (
+    values = (
         tx_data.get("status"),
         tx_data.get("transaction_status"),
         tx_data.get("payment_status"),
         tx_data.get("payment_status_code"),
         tx_data.get("response_code"),
     )
-    paid_values = {"0", "00", "success", "successful", "paid", "completed", "approved"}
-    return any(str(value).strip().lower() in paid_values for value in status_values if value is not None)
+    return any(
+        str(value).strip().lower()
+        in {"0", "00", "success", "successful", "paid", "completed", "approved"}
+        for value in values
+        if value is not None
+    )
+
+
+def _base_url() -> str:
+    base = KHQRPAY_BASE.rstrip("/")
+    for suffix in ("/api/payment-gateway/v1", "/payment-gateway/v1", "/api"):
+        if base.lower().endswith(suffix):
+            base = base[: -len(suffix)].rstrip("/")
+            break
+    return base
 
 
 def _api_url(profile_id: str, endpoint: str) -> str:
-    base = KHQRPAY_BASE.rstrip("/")
-    # Public KHQRPay examples use https://khqr.cc as the base. Accept a
-    # mistakenly configured trailing /api so Railway does not build an
-    # invalid https://khqr.cc/api/{profile}/... URL.
-    for suffix in ("/api/payment-gateway/v1", "/payment-gateway/v1", "/api"):
-        if base.lower().endswith(suffix):
-            base = base[:-len(suffix)].rstrip("/")
-            break
+    """Build the documented verification URL: /api/{profile}/..."""
     profile = str(profile_id or "").strip().strip("/")
-    return f"{base}/{profile}/payment-gateway/v1/payments/{endpoint}"
+    return f"{_base_url()}/api/{profile}/payment-gateway/v1/payments/{endpoint}"
+
+
+def _checkout_url(
+    profile_id: str,
+    secret_key: str,
+    transaction_id: str,
+    amount: float,
+    success_url: str,
+    remark: str,
+) -> str:
+    """Build the signed managed ABA checkout URL from the KHQRPay docs."""
+    amount_str = f"{amount:.2f}"
+    params = {
+        "transaction_id": transaction_id,
+        "amount": amount_str,
+        "success_url": success_url,
+        "remark": remark,
+        "hash": _sha1(secret_key, transaction_id, amount_str, success_url, remark),
+    }
+    profile = str(profile_id or "").strip().strip("/")
+    return f"{_base_url()}/api/payment/requestv2/{profile}?{urlencode(params)}"
+
+
+def _render_checkout_qr(checkout_url: str):
+    """Render the managed checkout URL into a Telegram-uploadable PNG."""
+    import io
+    import qrcode
+
+    buffer = io.BytesIO()
+    qrcode.make(checkout_url).save(buffer, format="PNG")
+    buffer.seek(0)
+    buffer.name = "aba-khqr-checkout.png"
+    return buffer
 
 
 async def create_aba_qr(
@@ -67,90 +97,74 @@ async def create_aba_qr(
     success_url: str = "https://t.me/storeaccount_bot",
     remark: str = "",
 ) -> dict:
-    """
-    Create an ABA Pay KHQR via Direct QR API (server-to-server).
-    Returns raw QR image URL — send directly in Telegram, no browser needed.
-
-    Returns:
-        {"success": True, "qr_image_url": "...", "qr_text": "...", "md5": "...", "amount": "..."}
-        {"success": False, "error": "..."}
-    """
+    """Create a signed managed ABA/KHQR checkout and render it as a QR."""
     amount_str = f"{amount:.2f}"
-    hash_val = _sha1(secret_key, transaction_id, amount_str, success_url, remark)
-
-    payload = {
-        "transaction_id": transaction_id,
-        "amount": amount_str,
-        "success_url": success_url,
-        "remark": remark,
-        "hash": hash_val,
-    }
-
-    # KHQRPay documents `purchase` as the current QR creation endpoint.
-    url = _api_url(profile_id, "purchase")
-    logger.info(f"KHQRPay QR API → {url} | txn={transaction_id} | amt={amount_str}")
+    checkout_url = _checkout_url(
+        profile_id,
+        secret_key,
+        transaction_id,
+        amount,
+        success_url,
+        remark,
+    )
 
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=payload, timeout=30) as resp:
-                raw = await resp.text()
-                logger.info(f"KHQRPay QR API ← {resp.status} | body={raw[:300]}")
-
-                try:
-                    data = json.loads(raw)
-                except Exception:
-                    if resp.status == 404:
+            # Probe the managed route before sending the QR. A redirect is
+            # expected; a 404 means the merchant profile is not active.
+            async with session.get(
+                checkout_url,
+                allow_redirects=False,
+                timeout=30,
+            ) as response:
+                raw = await response.text()
+                logger.info(
+                    "KHQRPay managed checkout probe HTTP %s | txn=%s",
+                    response.status,
+                    transaction_id,
+                )
+                if response.status >= 400:
+                    if response.status == 404:
                         return {
                             "success": False,
                             "error": (
-                                "KHQRPay returned HTTP 404. The configured merchant "
-                                "profile was not found at the payment endpoint. "
-                                "Use the exact Profile ID from the KHQRPay dashboard "
-                                "and set KHQRPAY_BASE_URL to https://khqr.cc. "
-                                "An Admin > Payment Settings profile overrides the "
-                                "Railway KHQRPAY_PROFILE_ID variable."
+                                "KHQRPay returned HTTP 404 for the managed checkout. "
+                                "Use an active Profile ID from the KHQRPay dashboard and "
+                                "confirm ABA/KHQR checkout access is enabled."
                             ),
+                            "http_status": response.status,
                         }
-                    return {"success": False, "error": f"Invalid JSON response (HTTP {resp.status})"}
-
-                if _is_success_code(data.get("responseCode")) and data.get("data"):
-                    tx_data = data["data"]
-                    qr_image_url = tx_data.get("qr_url") or tx_data.get("qr_image_url") or ""
-                    qr_text = tx_data.get("qr") or tx_data.get("qr_text") or ""
-                    if not qr_image_url and not qr_text:
-                        return {"success": False, "error": "Gateway returned no QR data"}
-                    if not qr_image_url and qr_text:
-                        # Some gateway responses return only the KHQR payload.
-                        # Render it locally so Telegram still receives a scannable image.
-                        try:
-                            import io
-                            import qrcode
-
-                            qr_buffer = io.BytesIO()
-                            qrcode.make(qr_text).save(qr_buffer, format="PNG")
-                            qr_buffer.seek(0)
-                            qr_buffer.name = "khqr.png"
-                            qr_image_url = qr_buffer
-                        except Exception as exc:
-                            logger.warning("Could not render gateway QR payload locally: %s", exc)
                     return {
-                        "success": True,
-                        "qr_image_url": qr_image_url,
-                        "qr_text": qr_text,
-                        "md5": tx_data.get("md5", ""),
-                        "amount": tx_data.get("amount", amount_str),
-                        "transaction_id": tx_data.get("transaction_id", transaction_id),
+                        "success": False,
+                        "error": f"KHQRPay checkout returned HTTP {response.status}",
+                        "http_status": response.status,
                     }
 
-                error_msg = data.get("responseMessage", f"API error (code {data.get('responseCode')})")
-                logger.warning(f"KHQRPay QR API failed: {error_msg} | full={raw[:500]}")
-                return {"success": False, "error": error_msg}
+                body = raw.lower()
+                if "profile not found" in body or "invalid profile" in body:
+                    return {
+                        "success": False,
+                        "error": "KHQRPay rejected the configured merchant profile.",
+                        "http_status": response.status,
+                    }
 
+        return {
+            "success": True,
+            "qr_image_url": _render_checkout_qr(checkout_url),
+            "qr_text": checkout_url,
+            "checkout_url": checkout_url,
+            "md5": "",
+            "amount": amount_str,
+            "transaction_id": transaction_id,
+        }
     except asyncio.TimeoutError:
-        return {"success": False, "error": "Gateway timeout — try again"}
-    except Exception as e:
-        logger.error(f"KHQRPay QR API error: {e}")
-        return {"success": False, "error": str(e)}
+        return {"success": False, "error": "KHQRPay checkout timeout - try again"}
+    except aiohttp.ClientError as exc:
+        logger.exception("KHQRPay checkout connection error")
+        return {"success": False, "error": f"KHQRPay connection error: {exc}"}
+    except Exception as exc:
+        logger.exception("KHQRPay checkout error")
+        return {"success": False, "error": str(exc)}
 
 
 async def verify_aba_payment(
@@ -158,63 +172,68 @@ async def verify_aba_payment(
     secret_key: str,
     transaction_id: str,
 ) -> dict:
-    """
-    Verify ABA Pay payment via Check Transaction V2.
-
-    Returns:
-        {"success": True, "paid": True/False, "amount": "..."}
-        {"success": False, "error": "..."}
-    """
-    hash_val = _sha1(secret_key, transaction_id)
-
+    """Verify a transaction using the documented check-trans endpoint."""
     payload = {
         "transaction_id": transaction_id,
-        "hash": hash_val,
+        "hash": _sha1(secret_key, transaction_id),
     }
-
-    url = _api_url(profile_id, "check-transv2-khqrcc")
+    url = _api_url(profile_id, "check-trans")
 
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=payload, timeout=30) as resp:
-                raw = await resp.text()
-                if resp.status >= 400:
-                    logger.warning(
-                        "KHQRPay verify HTTP %s for txn=%s: %s",
-                        resp.status,
-                        transaction_id,
-                        raw[:300],
-                    )
-                    return {
-                        "success": False,
-                        "paid": False,
-                        "error": f"KHQRPay verification HTTP {resp.status}",
-                        "http_status": resp.status,
-                    }
+            async with session.post(url, data=payload, timeout=30) as response:
+                raw = await response.text()
                 try:
                     data = json.loads(raw)
                 except Exception:
-                    logger.warning(
-                        "KHQRPay verify returned invalid JSON for txn=%s: %s",
-                        transaction_id,
-                        raw[:300],
-                    )
+                    if response.status >= 400:
+                        logger.warning(
+                            "KHQRPay verification HTTP %s for txn=%s: %s",
+                            response.status,
+                            transaction_id,
+                            raw[:300],
+                        )
+                        return {
+                            "success": False,
+                            "paid": False,
+                            "error": f"KHQRPay verification HTTP {response.status}",
+                            "http_status": response.status,
+                        }
                     return {
                         "success": False,
                         "paid": False,
                         "error": "Invalid KHQRPay verification response",
-                        "http_status": resp.status,
+                        "http_status": response.status,
+                    }
+
+                # KHQRPay may use HTTP 404 with responseCode=1 for a
+                # transaction that is not paid yet. That is a normal poll
+                # result, not a broken profile or network failure.
+                if str(data.get("responseCode")).strip() == "1":
+                    return {
+                        "success": True,
+                        "paid": False,
+                        "status": "pending",
+                        "gateway_code": data.get("responseCode"),
+                    }
+
+                if response.status >= 400:
+                    logger.warning(
+                        "KHQRPay verification HTTP %s for txn=%s: %s",
+                        response.status,
+                        transaction_id,
+                        raw[:300],
+                    )
+                    return {
+                        "success": False,
+                        "paid": False,
+                        "error": f"KHQRPay verification HTTP {response.status}",
+                        "http_status": response.status,
                     }
 
                 if _is_success_code(data.get("responseCode")) and data.get("data"):
                     tx_data = data["data"]
-                    status = str(
-                        tx_data.get("status")
-                        or tx_data.get("transaction_status")
-                        or tx_data.get("payment_status")
-                        or tx_data.get("payment_status_code")
-                        or ""
-                    ).strip().lower()
+                    status = str(tx_data.get("status") or "").strip().lower()
                     return {
                         "success": True,
                         "paid": _transaction_is_paid(tx_data),
@@ -234,10 +253,10 @@ async def verify_aba_payment(
                         "status": status,
                     }
 
-                # Non-zero response code — log error for debugging
-                logger.warning(
-                    f"KHQRPay verify failed: code={data.get('responseCode')} "
-                    f"msg={data.get('responseMessage', '?')} txn={transaction_id}"
+                logger.info(
+                    "KHQRPay transaction pending: code=%s txn=%s",
+                    data.get("responseCode"),
+                    transaction_id,
                 )
                 return {
                     "success": True,
@@ -245,10 +264,11 @@ async def verify_aba_payment(
                     "status": "pending",
                     "gateway_code": data.get("responseCode"),
                 }
-
-    except Exception as e:
-        logger.error(f"KHQRPay Verify V2 error: {e}")
-        return {"success": False, "error": str(e)}
+    except asyncio.TimeoutError:
+        return {"success": False, "paid": False, "error": "KHQRPay verification timeout"}
+    except Exception as exc:
+        logger.exception("KHQRPay verification error")
+        return {"success": False, "paid": False, "error": str(exc)}
 
 
 async def poll_aba_payment(
@@ -260,23 +280,19 @@ async def poll_aba_payment(
 ) -> dict:
     """Poll ABA Pay until confirmed or timeout."""
     import time
-    deadline = time.time() + timeout_seconds
 
+    deadline = time.time() + timeout_seconds
     while time.time() < deadline:
         result = await verify_aba_payment(profile_id, secret_key, transaction_id)
-        if not result["success"]:
-            await asyncio.sleep(interval)
-            continue
-        if result.get("paid"):
+        if result.get("success") and result.get("paid"):
             return result
         await asyncio.sleep(interval)
-
     return {"success": True, "paid": False}
 
 
 def get_khqrpay_config(conn) -> dict:
-    """Load KHQRPay config from bot_settings (with env fallbacks)."""
-    from config import KHQRPAY_PROFILE_ID, KHQRPAY_SECRET_KEY, KHQRPAY_ABA_URL
+    """Load KHQRPay config from bot_settings, with environment fallbacks."""
+    from config import KHQRPAY_ABA_URL, KHQRPAY_PROFILE_ID, KHQRPAY_SECRET_KEY
     from services.database import get_bot_setting
 
     return {

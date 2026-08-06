@@ -3309,8 +3309,8 @@ async def admin_settings_payment(update: Update, context: ContextTypes.DEFAULT_T
         f"💳 <b>Payment Gateway — KHQRPay</b>\n\n"
         f"🆔 Profile ID: <code>{pid}</code>\n"
         f"🔑 Secret Key: <code>{sk}</code>\n"
-        f"🔗 ABA Pay URL: <code>{aba}</code>\n\n"
-        f"<i>ABA Pay QR only. Auto-check is enabled after each QR is created.</i>",
+        f"🔗 Legacy ABA URL: <code>{aba}</code>\n\n"
+        f"<i>Managed ABA/KHQR checkout is used. Auto-check uses check-trans.</i>",
         parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
